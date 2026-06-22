@@ -136,7 +136,6 @@ struct UserInfo
     UserStatus status = UserStatus::Active;
 
     int     failedLoginCount = 0;
-    QString lockedUntil;
     QString lastLoginAt;
     QString lastLoginIp;
     QString createdAt;

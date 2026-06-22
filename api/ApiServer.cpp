@@ -127,11 +127,15 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetLogs(req); });
 
 
-    // User
+    // User — 고정 경로를 <arg> 패턴보다 먼저 등록해야 라우팅 우선순위가 올바르게 적용됨
     m_server.route("/api/users", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetUsers(req); });
     m_server.route("/api/users", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostUser(req); });
+    m_server.route("/api/users/login-history", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetLoginHistory(req); });
+    m_server.route("/api/users/login-history", QHttpServerRequest::Method::Delete,
+                   [this](const QHttpServerRequest &req) { return handleDeleteLoginHistory(req); });
     m_server.route("/api/users/<arg>", QHttpServerRequest::Method::Delete,
                    [this](const QString &username, const QHttpServerRequest &req) {
                        return handleDeleteUser(req, username); });
@@ -162,10 +166,6 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePostRestart(req); });
     m_server.route("/api/system/info", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetSystemInfo(req); });
-    m_server.route("/api/users/login-history", QHttpServerRequest::Method::Get,
-                   [this](const QHttpServerRequest &req) { return handleGetLoginHistory(req); });
-    m_server.route("/api/users/login-history", QHttpServerRequest::Method::Delete,
-                   [this](const QHttpServerRequest &req) { return handleDeleteLoginHistory(req); });
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +258,7 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
     case DataCollection::Database::LoginResult::AccountLocked: {
         Util::Logger::warning(QStringLiteral("Login denied (locked): %1 from %2").arg(username, ip));
         QJsonObject err;
-        err[QLatin1String("error")]  = dbError;
+        err[QLatin1String("error")]  = QStringLiteral("Account is locked. Contact administrator.");
         err[QLatin1String("reason")] = QStringLiteral("locked");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
@@ -1024,7 +1024,6 @@ QHttpServerResponse ApiServer::handleGetUsers(const QHttpServerRequest &request)
         obj["role"]             = Model::userRoleToString(u.role);
         obj["status"]           = Model::userStatusToString(u.status);
         obj["failedLoginCount"] = u.failedLoginCount;
-        obj["lockedUntil"]      = u.lockedUntil;
         obj["lastLoginAt"]      = u.lastLoginAt;
         obj["lastLoginIp"]      = u.lastLoginIp;
         arr.append(obj);
@@ -1334,15 +1333,9 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
 
     user.status = newStatus;
 
-    // active 로 전환 시 실패 카운터·잠금 시각 초기화
-    if (newStatus == Model::UserStatus::Active) {
+    // active 로 전환 시 실패 카운터 초기화
+    if (newStatus == Model::UserStatus::Active)
         user.failedLoginCount = 0;
-        user.lockedUntil      = QString();
-    }
-    // locked 로 수동 전환 시 만료 없음 (unlock 으로만 해제)
-    if (newStatus == Model::UserStatus::Locked) {
-        user.lockedUntil = QString();
-    }
 
     if (!m_db->updateUser(user, dbError)) {
         Util::Logger::error(QStringLiteral("updateUser (status) failed: %1").arg(dbError));
@@ -1419,6 +1412,7 @@ QHttpServerResponse ApiServer::handleDeleteLoginHistory(const QHttpServerRequest
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
+    // Empty username means all history. Log accordingly.
     if (username.isEmpty())
         Util::Logger::info(QStringLiteral("Login history cleared (all)."));
     else

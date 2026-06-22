@@ -16,9 +16,9 @@
 
 - [x] **2. `validateUser()` 로직 재작성**
   - DISABLED 계정 차단
-  - LOCKED 상태 확인 → `locked_until` 만료 시 자동 해제
+  - LOCKED 상태 즉시 차단 — 자동 해제 없음, 관리자 수동 해제만 가능
   - 비밀번호 실패 시 `failed_login_count` 증가
-  - 임계값 도달 시 LOCKED 처리 + `locked_until` 저장
+  - 임계값(5회) 도달 시 LOCKED 처리 (`locked_until` 미사용, 컬럼 제거)
   - 성공 시 `failed_login_count` 초기화, `last_login_at` / `last_login_ip` 저장
   - 실패 응답에 잠금 여부 구분 메시지 포함
 

@@ -181,7 +181,6 @@ bool DeviceDatabase::initSchema(QString& error)
             "  role TEXT NOT NULL CHECK(role IN ('user', 'manager', 'admin')),"
             "  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled', 'locked')),"
             "  failed_login_count INTEGER NOT NULL DEFAULT 0,"
-            "  locked_until TEXT,"
             "  last_login_at TEXT,"
             "  last_login_ip TEXT,"
             "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
@@ -643,7 +642,7 @@ QList<Model::UserInfo> DeviceDatabase::loadUsers(QString &error) const
 
     if (!q.exec(QStringLiteral(
             "SELECT id, username, display_name, description, password_hash, "
-            "role, status, failed_login_count, locked_until, "
+            "role, status, failed_login_count, "
             "last_login_at, last_login_ip, created_at, updated_at "
             "FROM users ORDER BY id"))) {
         error = q.lastError().text();
@@ -660,11 +659,10 @@ QList<Model::UserInfo> DeviceDatabase::loadUsers(QString &error) const
         user.role             = Model::userRoleFromString(q.value(5).toString());
         user.status           = Model::userStatusFromString(q.value(6).toString());
         user.failedLoginCount = q.value(7).toInt();
-        user.lockedUntil      = q.value(8).toString();
-        user.lastLoginAt      = q.value(9).toString();
-        user.lastLoginIp      = q.value(10).toString();
-        user.createdAt        = q.value(11).toString();
-        user.updatedAt        = q.value(12).toString();
+        user.lastLoginAt      = q.value(8).toString();
+        user.lastLoginIp      = q.value(9).toString();
+        user.createdAt        = q.value(10).toString();
+        user.updatedAt        = q.value(11).toString();
         users.append(user);
     }
 
@@ -686,7 +684,7 @@ Model::UserInfo DeviceDatabase::loadUser(const QString &username, bool &found, Q
 
     q.prepare(QStringLiteral(
         "SELECT id, username, display_name, description, password_hash, "
-        "role, status, failed_login_count, locked_until, "
+        "role, status, failed_login_count, "
         "last_login_at, last_login_ip, created_at, updated_at "
         "FROM users WHERE username=:username"));
     q.bindValue(":username", username);
@@ -708,11 +706,10 @@ Model::UserInfo DeviceDatabase::loadUser(const QString &username, bool &found, Q
     user.role             = Model::userRoleFromString(q.value(5).toString());
     user.status           = Model::userStatusFromString(q.value(6).toString());
     user.failedLoginCount = q.value(7).toInt();
-    user.lockedUntil      = q.value(8).toString();
-    user.lastLoginAt      = q.value(9).toString();
-    user.lastLoginIp      = q.value(10).toString();
-    user.createdAt        = q.value(11).toString();
-    user.updatedAt        = q.value(12).toString();
+    user.lastLoginAt      = q.value(8).toString();
+    user.lastLoginIp      = q.value(9).toString();
+    user.createdAt        = q.value(10).toString();
+    user.updatedAt        = q.value(11).toString();
 
     return user;
 }
@@ -767,7 +764,6 @@ bool DeviceDatabase::updateUser(const Model::UserInfo &user, QString &error)
         "role=:role, "
         "status=:status, "
         "failed_login_count=:failed_login_count, "
-        "locked_until=:locked_until, "
         "updated_at=CURRENT_TIMESTAMP "
         "WHERE username=:username"
         ));
@@ -779,9 +775,6 @@ bool DeviceDatabase::updateUser(const Model::UserInfo &user, QString &error)
     q.bindValue(":role",               Model::userRoleToString(user.role));
     q.bindValue(":status",             Model::userStatusToString(user.status));
     q.bindValue(":failed_login_count", user.failedLoginCount);
-    q.bindValue(":locked_until",       user.lockedUntil.isEmpty()
-                                           ? QVariant(QMetaType(QMetaType::QString))
-                                           : user.lockedUntil);
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -812,8 +805,6 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
                                           QString &error)
 {
     static constexpr int kMaxFailedAttempts  = 5;
-    static constexpr int kLockDurationSecs   = 10 * 60;  // 10분
-
     if (!isOpen()) {
         error = QStringLiteral("Database is not open.");
         return LoginResult::InvalidCredentials;
@@ -824,7 +815,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
 
     // 1. 사용자 레코드 조회
     q.prepare(QStringLiteral(
-        "SELECT password_hash, status, failed_login_count, locked_until "
+        "SELECT password_hash, status, failed_login_count "
         "FROM users WHERE username=:username"));
     q.bindValue(":username", username);
 
@@ -836,10 +827,9 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     if (!q.next())
         return LoginResult::InvalidCredentials;  // 존재하지 않는 계정도 동일 응답
 
-    const QString storedHash      = q.value(0).toString();
-    Model::UserStatus status      = Model::userStatusFromString(q.value(1).toString());
-    int failedCount               = q.value(2).toInt();
-    const QString lockedUntilStr  = q.value(3).toString();
+    const QString storedHash = q.value(0).toString();
+    Model::UserStatus status = Model::userStatusFromString(q.value(1).toString());
+    int failedCount          = q.value(2).toInt();
 
     // 2. DISABLED 체크
     if (status == Model::UserStatus::Disabled) {
@@ -847,28 +837,10 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
         return LoginResult::AccountDisabled;
     }
 
-    // 3. LOCKED 체크 — 만료 시 자동 해제
+    // 3. LOCKED 체크 — 자동 해제 없음, 관리자가 ACTIVE로 변경해야 해제됨
     if (status == Model::UserStatus::Locked) {
-        if (!lockedUntilStr.isEmpty()) {
-            QDateTime lockExpiry = QDateTime::fromString(lockedUntilStr,
-                                                         QStringLiteral("yyyy-MM-dd HH:mm:ss"));
-            lockExpiry.setTimeSpec(Qt::UTC);
-
-            if (QDateTime::currentDateTimeUtc() < lockExpiry) {
-                error = QStringLiteral("Account is locked until %1 (UTC).").arg(lockedUntilStr);
-                return LoginResult::AccountLocked;
-            }
-        }
-
-        // 잠금 만료 → 자동 해제
-        QSqlQuery unlockQ(db);
-        unlockQ.prepare(QStringLiteral(
-            "UPDATE users SET status='active', failed_login_count=0, locked_until=NULL "
-            "WHERE username=:username"));
-        unlockQ.bindValue(":username", username);
-        unlockQ.exec();
-        status      = Model::UserStatus::Active;
-        failedCount = 0;
+        error = QStringLiteral("Account is locked. Contact administrator.");
+        return LoginResult::AccountLocked;
     }
 
     // 4. 비밀번호 검증
@@ -879,18 +851,14 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
         const int newCount = failedCount + 1;
 
         if (newCount >= kMaxFailedAttempts) {
-            const QString until = QDateTime::currentDateTimeUtc()
-                                      .addSecs(kLockDurationSecs)
-                                      .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
             QSqlQuery lockQ(db);
             lockQ.prepare(QStringLiteral(
-                "UPDATE users SET status='locked', failed_login_count=:count, locked_until=:until "
+                "UPDATE users SET status='locked', failed_login_count=:count "
                 "WHERE username=:username"));
             lockQ.bindValue(":count",    newCount);
-            lockQ.bindValue(":until",    until);
             lockQ.bindValue(":username", username);
             lockQ.exec();
-            error = QStringLiteral("Account locked due to too many failed attempts. Unlocks at %1 (UTC).").arg(until);
+            error = QStringLiteral("Account locked due to too many failed attempts. Contact administrator.");
             return LoginResult::AccountLocked;
         }
 
@@ -908,7 +876,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     QSqlQuery successQ(db);
     successQ.prepare(QStringLiteral(
         "UPDATE users SET "
-        "failed_login_count=0, locked_until=NULL, status='active', "
+        "failed_login_count=0, "
         "last_login_at=CURRENT_TIMESTAMP, last_login_ip=:ip "
         "WHERE username=:username"));
     successQ.bindValue(":ip",       ip.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : ip);
