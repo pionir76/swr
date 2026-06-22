@@ -1,0 +1,44 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeLists.txt.user
+cmake_install.cmake
+install_manifest.txt
+Makefile
+
+# Qt
+*.qm
+*.pro.user
+*.pro.user.*
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+.qmake.stash
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Credentials & secrets
+*.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
