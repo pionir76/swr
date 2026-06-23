@@ -50,6 +50,11 @@ AppConfig factoryDefaultConfig()
     cfg.modbusServer.port    = 502;
     cfg.modbusServer.slaveId = 1;
 
+    cfg.loginSecurity.maxFailedAttempts     = 5;
+    cfg.loginSecurity.sessionTimeoutMinutes = 30;
+    cfg.loginSecurity.minPasswordLength     = 8;
+    cfg.loginSecurity.autoLogout            = true;
+
     return cfg;
 }
 
@@ -119,6 +124,13 @@ AppConfig loadConfig(const QString &filePath)
     config.modbusServer.port    = static_cast<quint16>(mbs.value(QLatin1String("port")).toInt(502));
     config.modbusServer.slaveId = mbs.value(QLatin1String("slaveId")).toInt(1);
 
+    // login_security
+    const QJsonObject ls = root.value(QLatin1String("login_security")).toObject();
+    config.loginSecurity.maxFailedAttempts     = ls.value(QLatin1String("maxFailedAttempts")).toInt(5);
+    config.loginSecurity.sessionTimeoutMinutes = ls.value(QLatin1String("sessionTimeoutMinutes")).toInt(30);
+    config.loginSecurity.minPasswordLength     = ls.value(QLatin1String("minPasswordLength")).toInt(8);
+    config.loginSecurity.autoLogout            = ls.value(QLatin1String("autoLogout")).toBool(true);
+
     return config;
 }
 
@@ -163,11 +175,18 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     mbs[QLatin1String("port")]    = config.modbusServer.port;
     mbs[QLatin1String("slaveId")] = config.modbusServer.slaveId;
 
+    QJsonObject ls;
+    ls[QLatin1String("maxFailedAttempts")]     = config.loginSecurity.maxFailedAttempts;
+    ls[QLatin1String("sessionTimeoutMinutes")] = config.loginSecurity.sessionTimeoutMinutes;
+    ls[QLatin1String("minPasswordLength")]     = config.loginSecurity.minPasswordLength;
+    ls[QLatin1String("autoLogout")]            = config.loginSecurity.autoLogout;
+
     QJsonObject root;
-    root[QLatin1String("network")]       = net;
-    root[QLatin1String("serial")]        = serial;
-    root[QLatin1String("system")]        = sys;
-    root[QLatin1String("modbus_server")] = mbs;
+    root[QLatin1String("network")]        = net;
+    root[QLatin1String("serial")]         = serial;
+    root[QLatin1String("system")]         = sys;
+    root[QLatin1String("modbus_server")]  = mbs;
+    root[QLatin1String("login_security")] = ls;
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

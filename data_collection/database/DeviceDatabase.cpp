@@ -111,6 +111,7 @@ bool DeviceDatabase::resetSchema(QString& error)
         QStringLiteral("DROP TABLE IF EXISTS users"),
         QStringLiteral("DROP TABLE IF EXISTS login_history"),
 
+        QStringLiteral("DROP TABLE IF EXISTS device_poll_log"),
         QStringLiteral("DROP TABLE IF EXISTS trends"),
         QStringLiteral("DROP TABLE IF EXISTS hmi_layouts"),
         QStringLiteral("DROP TABLE IF EXISTS sessions")
@@ -253,6 +254,24 @@ bool DeviceDatabase::initSchema(QString& error)
         QStringLiteral(
             "CREATE INDEX IF NOT EXISTS idx_login_history_username "
             "ON login_history(username)"
+        ),
+
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS device_poll_log ("
+            "  id             INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  device_id      INTEGER NOT NULL,"
+            "  device_name    TEXT    NOT NULL,"
+            "  timestamp      TEXT    NOT NULL,"
+            "  success        INTEGER NOT NULL DEFAULT 0,"
+            "  duration_ms    INTEGER NOT NULL DEFAULT -1,"
+            "  register_count INTEGER NOT NULL DEFAULT 0,"
+            "  message        TEXT    NOT NULL DEFAULT ''"
+            ")"
+        ),
+
+        QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_poll_log_device "
+            "ON device_poll_log(device_id, id)"
         )
     };
 
@@ -802,9 +821,9 @@ bool DeviceDatabase::deleteUser(const QString &username, QString &error)
 LoginResult DeviceDatabase::validateUser(const QString &username,
                                           const QString &password,
                                           const QString &ip,
+                                          int maxFailedAttempts,
                                           QString &error)
 {
-    static constexpr int kMaxFailedAttempts  = 5;
     if (!isOpen()) {
         error = QStringLiteral("Database is not open.");
         return LoginResult::InvalidCredentials;
@@ -813,7 +832,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
 
-    // 1. 사용자 레코드 조회
+    // 1. Search User Info form DB
     q.prepare(QStringLiteral(
         "SELECT password_hash, status, failed_login_count "
         "FROM users WHERE username=:username"));
@@ -824,33 +843,35 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
         return LoginResult::InvalidCredentials;
     }
 
+    // Not exist user.
     if (!q.next())
-        return LoginResult::InvalidCredentials;  // 존재하지 않는 계정도 동일 응답
+        return LoginResult::InvalidCredentials;
 
     const QString storedHash = q.value(0).toString();
     Model::UserStatus status = Model::userStatusFromString(q.value(1).toString());
     int failedCount          = q.value(2).toInt();
 
-    // 2. DISABLED 체크
+    // 2. Is Disabled User?
     if (status == Model::UserStatus::Disabled) {
         error = QStringLiteral("Account is disabled.");
         return LoginResult::AccountDisabled;
     }
 
-    // 3. LOCKED 체크 — 자동 해제 없음, 관리자가 ACTIVE로 변경해야 해제됨
+    // 3. Is Locked User?
     if (status == Model::UserStatus::Locked) {
         error = QStringLiteral("Account is locked. Contact administrator.");
         return LoginResult::AccountLocked;
     }
 
-    // 4. 비밀번호 검증
+    // 4. Verify password
     const QString hash = QString::fromLatin1(
         QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256).toHex());
 
+    // Not match for password.
     if (hash != storedHash) {
         const int newCount = failedCount + 1;
 
-        if (newCount >= kMaxFailedAttempts) {
+        if (newCount >= maxFailedAttempts) {
             QSqlQuery lockQ(db);
             lockQ.prepare(QStringLiteral(
                 "UPDATE users SET status='locked', failed_login_count=:count "
@@ -872,7 +893,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
         return LoginResult::InvalidCredentials;
     }
 
-    // 5. 인증 성공 — 카운터 초기화, 마지막 로그인 정보 갱신
+    // 5. Success , Reset failed login count, last login data & ip
     QSqlQuery successQ(db);
     successQ.prepare(QStringLiteral(
         "UPDATE users SET "
@@ -1305,6 +1326,46 @@ bool DeviceDatabase::insertRefrigerationSampleDevices(QString &error)
 }
 */
 
+
+QList<Model::PollLogEntry> DeviceDatabase::fetchPollLog(int deviceId, int limit, QString &error) const
+{
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+
+    if (deviceId >= 0) {
+        q.prepare(
+            "SELECT id, device_id, device_name, timestamp, success, duration_ms, register_count, message "
+            "FROM device_poll_log WHERE device_id = :did ORDER BY id DESC LIMIT :lim"
+        );
+        q.bindValue(QStringLiteral(":did"), deviceId);
+    } else {
+        q.prepare(
+            "SELECT id, device_id, device_name, timestamp, success, duration_ms, register_count, message "
+            "FROM device_poll_log ORDER BY id DESC LIMIT :lim"
+        );
+    }
+    q.bindValue(QStringLiteral(":lim"), limit > 0 ? limit : 200);
+
+    if (!q.exec()) {
+        error = q.lastError().text();
+        return {};
+    }
+
+    QList<Model::PollLogEntry> result;
+    while (q.next()) {
+        Model::PollLogEntry e;
+        e.id            = q.value(0).toLongLong();
+        e.deviceId      = q.value(1).toInt();
+        e.deviceName    = q.value(2).toString();
+        e.timestamp     = q.value(3).toString();
+        e.success       = q.value(4).toInt() != 0;
+        e.durationMs    = q.value(5).toInt();
+        e.registerCount = q.value(6).toInt();
+        e.message       = q.value(7).toString();
+        result.append(e);
+    }
+    return result;
+}
 
 } // namespace Database
 } // namespace DataCollection

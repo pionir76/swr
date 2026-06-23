@@ -45,12 +45,6 @@ bool RegisterExecutor::readField(const Model::RegisterField &field,
         return false;
     }
 
-    if (field.length > MAX_READ_QUANTITY) {
-        error = QStringLiteral("Read quantity exceeded (%1): requested %2 for field %3")
-        .arg(MAX_READ_QUANTITY).arg(field.length).arg(field.tagName);
-        return false;
-    }
-
     switch (field.type) {
     case Model::RegisterType::Coil:
     case Model::RegisterType::DiscreteInput:
@@ -87,12 +81,6 @@ bool RegisterExecutor::writeField(const Model::RegisterField &field,
         return false;
     }
 
-    if (field.length > MAX_READ_QUANTITY) {
-        error = QStringLiteral("Write quantity exceeded (%1): requested %2 for field %3")
-        .arg(MAX_READ_QUANTITY).arg(field.length).arg(field.tagName);
-        return false;
-    }
-
     switch (field.type) {
     case Model::RegisterType::Coil:
     case Model::RegisterType::BitRegister: {
@@ -117,6 +105,41 @@ bool RegisterExecutor::writeField(const Model::RegisterField &field,
         error = QStringLiteral("Unsupported write target: %1").arg(Model::registerTypeToString(field.type));
         return false;
     }
+}
+
+bool RegisterExecutor::readBatch(int startAddress,
+                                 int totalLength,
+                                 Model::RegisterType type,
+                                 QVector<quint16> &registerValues,
+                                 QVector<bool>    &coilValues,
+                                 QString          &error)
+{
+    if (!m_client) {
+        error = QStringLiteral("Device client is not initialized");
+        return false;
+    }
+
+    switch (type) {
+    case Model::RegisterType::Coil:
+    case Model::RegisterType::DiscreteInput:
+    case Model::RegisterType::BitRegister:
+        return m_client->readBits(startAddress, totalLength, coilValues, error);
+
+    case Model::RegisterType::HoldingRegister:
+    case Model::RegisterType::InputRegister:
+    case Model::RegisterType::WordRegister:
+        return m_client->readWords(startAddress, totalLength, registerValues, error);
+
+    default:
+        error = QStringLiteral("Unsupported register type: %1").arg(Model::registerTypeToString(type));
+        return false;
+    }
+}
+
+QVector<quint16> RegisterExecutor::applyFieldByteOrder(const QVector<quint16> &values,
+                                                        const Model::RegisterField &field) const
+{
+    return applyByteOrder(values, effectiveByteOrder(field));
 }
 
 QVector<quint16> RegisterExecutor::applyByteOrder(const QVector<quint16> &values,

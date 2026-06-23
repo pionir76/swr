@@ -78,6 +78,8 @@ add_executable(swr
   data_collection/polling/PollingManager.h data_collection/polling/PollingManager.cpp
   data_collection/polling/SerialWorker.h data_collection/polling/SerialWorker.cpp
   data_collection/polling/TcpWorker.h data_collection/polling/TcpWorker.cpp
+  data_collection/polling/PollLogQueue.h
+  data_collection/polling/LogWriterThread.h data_collection/polling/LogWriterThread.cpp
   data_collection/store/DeviceList.h data_collection/store/DeviceList.cpp
   api/ApiServer.h api/ApiServer.cpp
 

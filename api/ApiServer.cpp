@@ -98,6 +98,8 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetDevices(req); });
     m_server.route("/api/devices/status", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetDeviceStatus(req); });
+    m_server.route("/api/devices/poll-log", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetDevicePollLog(req); });
     m_server.route("/api/devices", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostDevice(req); });
     m_server.route("/api/devices/<arg>", QHttpServerRequest::Method::Put,
@@ -136,6 +138,10 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetLoginHistory(req); });
     m_server.route("/api/users/login-history", QHttpServerRequest::Method::Delete,
                    [this](const QHttpServerRequest &req) { return handleDeleteLoginHistory(req); });
+    m_server.route("/api/users/security-policy", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetSecurityPolicy(req); });
+    m_server.route("/api/users/security-policy", QHttpServerRequest::Method::Put,
+                   [this](const QHttpServerRequest &req) { return handlePutSecurityPolicy(req); });
     m_server.route("/api/users/<arg>", QHttpServerRequest::Method::Delete,
                    [this](const QString &username, const QHttpServerRequest &req) {
                        return handleDeleteUser(req, username); });
@@ -226,9 +232,15 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
     const QString password = body.value("password").toString();
     const QString ip       = request.remoteAddress().toString();
 
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+
     QString dbError;
     const DataCollection::Database::LoginResult result =
-        m_db->validateUser(username, password, ip, dbError);
+        m_db->validateUser(username, 
+                        password, 
+                        ip,
+                        cfg.loginSecurity.maxFailedAttempts, 
+                        dbError);
 
     Model::LoginHistoryEntry hist;
     hist.username = username;
@@ -1049,9 +1061,17 @@ QHttpServerResponse ApiServer::handlePostUser(const QHttpServerRequest &request)
     const QString password    = body.value("password").toString();
     const QString roleStr     = body.value("role").toString().toLower().trimmed();
 
+    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
+
     if (username.isEmpty() || password.isEmpty()) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("username and password are required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    if (password.length() < minPwLen) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("password must be at least %1 characters").arg(minPwLen);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
@@ -1215,9 +1235,10 @@ QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &r
 
     const QJsonObject body = doc.object();
     const QString newPassword = body.value(QLatin1String("newPassword")).toString();
-    if (newPassword.length() < 8) {
+    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
+    if (newPassword.length() < minPwLen) {
         QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("newPassword must be at least 8 characters");
+        err[QLatin1String("error")] = QStringLiteral("newPassword must be at least %1 characters").arg(minPwLen);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
@@ -1351,6 +1372,45 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
     return QHttpServerResponse(resp);
 }
 
+QHttpServerResponse ApiServer::handleGetDevicePollLog(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QUrlQuery query(request.url());
+    const int deviceId = query.hasQueryItem(QStringLiteral("deviceId"))
+                         ? query.queryItemValue(QStringLiteral("deviceId")).toInt()
+                         : -1;
+    const int limit    = query.hasQueryItem(QStringLiteral("limit"))
+                         ? query.queryItemValue(QStringLiteral("limit")).toInt()
+                         : 200;
+
+    QString error;
+    const QList<DataCollection::Model::PollLogEntry> entries =
+        m_db->fetchPollLog(deviceId, limit, error);
+
+    if (!error.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = error;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonArray arr;
+    for (const auto &e : entries) {
+        QJsonObject obj;
+        obj[QLatin1String("id")]            = e.id;
+        obj[QLatin1String("deviceId")]      = e.deviceId;
+        obj[QLatin1String("deviceName")]    = e.deviceName;
+        obj[QLatin1String("timestamp")]     = e.timestamp;
+        obj[QLatin1String("success")]       = e.success;
+        obj[QLatin1String("durationMs")]    = e.durationMs;
+        obj[QLatin1String("registerCount")] = e.registerCount;
+        obj[QLatin1String("message")]       = e.message;
+        arr.append(obj);
+    }
+    return QHttpServerResponse(arr);
+}
+
 QHttpServerResponse ApiServer::handleGetLoginHistory(const QHttpServerRequest &request)
 {
     if (!isAuthenticated(request))
@@ -1419,6 +1479,83 @@ QHttpServerResponse ApiServer::handleDeleteLoginHistory(const QHttpServerRequest
         Util::Logger::info(QStringLiteral("Login history cleared: %1").arg(username));
 
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
+}
+
+QHttpServerResponse ApiServer::handleGetSecurityPolicy(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const LoginSecurityConfig &ls = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity;
+
+    QJsonObject resp;
+    resp[QLatin1String("maxFailedAttempts")]     = ls.maxFailedAttempts;
+    resp[QLatin1String("sessionTimeoutMinutes")] = ls.sessionTimeoutMinutes;
+    resp[QLatin1String("minPasswordLength")]     = ls.minPasswordLength;
+    resp[QLatin1String("autoLogout")]            = ls.autoLogout;
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handlePutSecurityPolicy(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+
+    AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    LoginSecurityConfig &ls = config.loginSecurity;
+
+    if (body.contains(QLatin1String("maxFailedAttempts"))) {
+        const int v = body.value(QLatin1String("maxFailedAttempts")).toInt();
+        if (v < 1 || v > 20) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("maxFailedAttempts must be 1–20");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        ls.maxFailedAttempts = v;
+    }
+    if (body.contains(QLatin1String("sessionTimeoutMinutes"))) {
+        const int v = body.value(QLatin1String("sessionTimeoutMinutes")).toInt();
+        if (v < 1 || v > 1440) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("sessionTimeoutMinutes must be 1–1440");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        ls.sessionTimeoutMinutes = v;
+    }
+    if (body.contains(QLatin1String("minPasswordLength"))) {
+        const int v = body.value(QLatin1String("minPasswordLength")).toInt();
+        if (v < 4 || v > 32) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("minPasswordLength must be 4–32");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        ls.minPasswordLength = v;
+    }
+    if (body.contains(QLatin1String("autoLogout")))
+        ls.autoLogout = body.value(QLatin1String("autoLogout")).toBool();
+
+    QString saveError;
+    if (!saveConfig(QStringLiteral(SR_CONFIG_FILE), config, saveError)) {
+        Util::Logger::error(QStringLiteral("saveConfig (security-policy) failed: %1").arg(saveError));
+        QJsonObject err;
+        err[QLatin1String("error")] = saveError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    Util::Logger::info(QStringLiteral("Login security policy updated."));
+
+    QJsonObject resp;
+    resp[QLatin1String("maxFailedAttempts")]     = ls.maxFailedAttempts;
+    resp[QLatin1String("sessionTimeoutMinutes")] = ls.sessionTimeoutMinutes;
+    resp[QLatin1String("minPasswordLength")]     = ls.minPasswordLength;
+    resp[QLatin1String("autoLogout")]            = ls.autoLogout;
+    return QHttpServerResponse(resp);
 }
 
 // ---------------------------------------------------------------------------

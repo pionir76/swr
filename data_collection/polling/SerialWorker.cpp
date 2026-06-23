@@ -12,11 +12,13 @@ namespace Polling {
 SerialWorker::SerialWorker(QList<Model::DeviceInfo> devices,
                            std::shared_ptr<Store::RegisterTable> table,
                            std::shared_ptr<Store::DeviceList> deviceList,
+                           PollLogQueue *logQueue,
                            QObject *parent)
     : QThread(parent)
     , m_devices(std::move(devices))
     , m_table(std::move(table))
     , m_deviceList(std::move(deviceList))
+    , m_logQueue(logQueue)
 {
 }
 
@@ -57,6 +59,7 @@ void SerialWorker::run()
             collectors[i]->flushWrites();
 
             if (now - lastPollMs[i] < m_devices[i].polling.intervalMs) continue;
+            if (m_devices[i].registers.isEmpty()) continue;
 
             anyPolled = true;
 
@@ -66,29 +69,34 @@ void SerialWorker::run()
             bool allOk = true;
             QString lastError;
 
-            for (const Model::RegisterField &field : m_devices[i].registers) {
+            if (!m_running) continue;
+
+            //-----------------------------------------------------------------------//
+            // Read Batch of fields for the device
+            // collectAllFields() → buildBatches() → readBatch()  → readWords()(FC03)
+            //-----------------------------------------------------------------------//
+            const QList<Processor::DataCollector::FieldResult> results = collectors[i]->collectAllFields();
+
+            for (int fi = 0; fi < m_devices[i].registers.size(); ++fi) {
                 if (!m_running) break;
 
-                QVector<quint16> regValues;
-                QVector<bool> coilValues;
-                QString error;
+                const Processor::DataCollector::FieldResult &r = results.at(fi);
+                const Model::RegisterField &field = m_devices[i].registers.at(fi);
 
-                const bool ok = collectors[i]->collectField(field, regValues, coilValues, error);
-                
                 m_table->updateUnifiedRegister(
-                    m_devices[i].id, 
-                    field, 
-                    regValues, 
-                    coilValues, 
-                    ok, 
-                    error, 
+                    m_devices[i].id,
+                    field,
+                    r.registerValues,
+                    r.coilValues,
+                    r.ok,
+                    r.error,
                     m_devices[i].polling.intervalMs);
 
-                if (!ok) {
+                if (!r.ok) {
                     allOk = false;
-                    lastError = error;
+                    lastError = r.error;
                     qWarning("Serial poll failed [device %d, field %s]: %s",
-                             m_devices[i].id, qPrintable(field.tagName), qPrintable(error));
+                             m_devices[i].id, qPrintable(field.tagName), qPrintable(r.error));
                 }
             }
 
@@ -107,6 +115,21 @@ void SerialWorker::run()
             status.consecutiveErrors = consecutiveErrors[i];
 
             m_deviceList->updateStatus(m_devices[i].id, status);
+
+            if (m_logQueue) {
+                Model::PollLogEntry entry;
+                entry.deviceId      = m_devices[i].id;
+                entry.deviceName    = m_devices[i].name;
+                entry.timestamp     = QDateTime::fromMSecsSinceEpoch(pollStart)
+                                          .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+                entry.success       = allOk;
+                entry.durationMs    = status.lastPollDurationMs;
+                entry.registerCount = m_devices[i].registers.size();
+                entry.message       = allOk
+                    ? QStringLiteral("Read %1 registers OK").arg(m_devices[i].registers.size())
+                    : lastError;
+                m_logQueue->push(entry);
+            }
 
             // Util::Logger::info(QStringLiteral("Serial Worker Running [%1] : %2")
             //                        .arg(m_devices[i].name)

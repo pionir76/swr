@@ -90,6 +90,13 @@ private:
     QHttpServerResponse handleGetLoginHistory(const QHttpServerRequest &request);
     QHttpServerResponse handleDeleteLoginHistory(const QHttpServerRequest &request);
 
+    // Poll Log
+    QHttpServerResponse handleGetDevicePollLog(const QHttpServerRequest &request);
+
+    // Security Policy
+    QHttpServerResponse handleGetSecurityPolicy(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutSecurityPolicy(const QHttpServerRequest &request);
+
     // DB & DeviceList Sync Helper
     bool syncAddDevice(const DataCollection::Model::DeviceInfo &device, QString &error);
     bool syncUpdateDevice(const DataCollection::Model::DeviceInfo &device, QString &error);

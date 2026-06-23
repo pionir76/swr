@@ -158,6 +158,17 @@ struct LoginHistoryEntry {
     QString ip;
 };
 
+struct PollLogEntry {
+    qint64  id            = -1;
+    int     deviceId      = -1;
+    QString deviceName;
+    QString timestamp;
+    bool    success       = false;
+    int     durationMs    = -1;
+    int     registerCount = 0;
+    QString message;
+};
+
 
 //--------------------------------------------------------------------//
 // Helper

@@ -34,11 +34,19 @@ struct ModbusServerConfig {
     int     slaveId = 1;
 };
 
+struct LoginSecurityConfig {
+    int  maxFailedAttempts     = 5;
+    int  sessionTimeoutMinutes = 30;
+    int  minPasswordLength     = 8;
+    bool autoLogout            = true;
+};
+
 struct AppConfig {
     QList<NetInterfaceConfig> networkInterfaces;
     Rs485Config               rs485;
     SysSettings               system;
     ModbusServerConfig        modbusServer;
+    LoginSecurityConfig       loginSecurity;
 };
 
 inline QSerialPort::Parity rs485Parity(const Rs485Config &cfg)

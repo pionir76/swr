@@ -24,24 +24,108 @@ bool DataCollector::initialize(QString &error)
     return m_executor->connect(error);
 }
 
+bool DataCollector::ensureConnected(QString &error)
+{
+    if (!m_executor && !initialize(error))
+        return false;
+    if (!m_executor->isConnected() && !m_executor->connect(error))
+        return false;
+    return true;
+}
+
 bool DataCollector::collectField(const Model::RegisterField &field,
                                  QVector<quint16> &registerValues,
                                  QVector<bool> &coilValues,
                                  QString &error)
 {
-    if (!m_executor) {
-        if (!initialize(error)) {
-            return false;
-        }
-    }
-
-    if (!m_executor->isConnected()) {
-        if (!m_executor->connect(error)) {
-            return false;
-        }
-    }
-
+    if (!ensureConnected(error))
+        return false;
     return m_executor->readField(field, registerValues, coilValues, error);
+}
+
+QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
+{
+    QList<RegisterBatch> batches;
+
+    for (int i = 0; i < m_device.registers.size(); ++i) {
+        const Model::RegisterField &field = m_device.registers.at(i);
+
+        bool canMerge = false;
+        if (!batches.isEmpty()) {
+            const RegisterBatch &last = batches.last();
+            canMerge = (last.type == field.type)
+                    && (field.address == last.startAddress + last.totalLength)
+                    && (last.totalLength + field.length <= Comm::RegisterExecutor::MAX_READ_QUANTITY);
+        }
+
+        if (canMerge) {
+            RegisterBatch &last = batches.last();
+            last.slices.append({i, last.totalLength, field.length});
+            last.totalLength += field.length;
+        } else {
+            RegisterBatch batch;
+            batch.startAddress = field.address;
+            batch.totalLength  = field.length;
+            batch.type         = field.type;
+            batch.slices.append({i, 0, field.length});
+            batches.append(batch);
+        }
+    }
+
+    return batches;
+}
+
+QList<DataCollector::FieldResult> DataCollector::collectAllFields()
+{
+    const int count = m_device.registers.size();
+    QList<FieldResult> results(count);
+
+    QString connError;
+    if (!ensureConnected(connError)) {
+        for (auto &r : results) { r.ok = false; r.error = connError; }
+        return results;
+    }
+
+    for (const RegisterBatch &batch : buildBatches()) {
+        QVector<quint16> rawWords;
+        QVector<bool>    rawBits;
+        QString error;
+
+        const bool ok = m_executor->readBatch(batch.startAddress, 
+                                            batch.totalLength,
+                                            batch.type, 
+                                            rawWords, 
+                                            rawBits, 
+                                            error);
+
+        //-----------------------------------------------------------------//
+        // Batch: start=100, total=7
+        // rawWords = [A0, A1,      B0, B1, B2, B3,  C0]
+        //             ↑Slice0     ↑Slice1        ↑Slice2
+        // Put results  of every slice into the results vector.
+        //-----------------------------------------------------------------//
+        for (const FieldSlice &slice : batch.slices) {
+            FieldResult &r = results[slice.fieldIndex];
+            if (!ok) {
+                r.ok    = false;
+                r.error = error;
+                continue;
+            }
+            r.ok = true;
+
+            // Coil Registers: extract from rawBits
+            if (!rawBits.isEmpty()) {
+                r.coilValues = rawBits.mid(slice.offset, slice.length);
+            } 
+            // Word Registers 
+            else {
+                const QVector<quint16> sliceVals = rawWords.mid(slice.offset, slice.length);
+                r.registerValues = m_executor->applyFieldByteOrder(sliceVals, m_device.registers.at(slice.fieldIndex));
+            }
+        }
+    }
+
+    return results;
 }
 
 

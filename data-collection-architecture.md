@@ -161,7 +161,7 @@ swr/
 - `pclink/PcLinkClient` : Samwontech PCLink ASCII over RS485 구현
 - `pclink/PcLinkSumTCPClient` : Samwontech PCLink+SUM over TCP (구현 예정)
 - `DeviceClientFactory` : 장비 DeviceConnection 설정을 바탕으로 적합한 IDeviceClient 생성
-- `RegisterExecutor` : RegisterField 기반 읽기/쓰기 실행, 바이트 오더 처리, 최대 읽기 수량 제한(32 words)
+- `RegisterExecutor` : RegisterField 기반 읽기/쓰기 실행, 바이트 오더 처리, 최대 읽기 수량 제한(64 words/coils), 배치 읽기(`readBatch`) 지원
 
 ### 5) `polling/`
 
@@ -181,7 +181,7 @@ swr/
 
 주요 파일
 
-- `DataCollector` : DeviceInfo를 받아 `RegisterExecutor`를 통해 레지스터 값을 읽어오는 핵심 엔진, WriteRequest 큐도 처리(`flushWrites`)
+- `DataCollector` : DeviceInfo를 받아 `RegisterExecutor`를 통해 레지스터 값을 읽어오는 핵심 엔진, WriteRequest 큐도 처리(`flushWrites`), 연속 주소 필드를 배치로 묶어 단일 요청으로 처리(`collectAllFields` → `buildBatches`)
 
 ### 7) `store/`
 
@@ -232,7 +232,7 @@ swr/
 [6] 폴링 루프 (Worker Thread 반복)
     SerialWorker / TcpWorker
     → DataCollector.initialize() → DeviceClientFactory → IDeviceClient 생성
-    → DataCollector.collectField() → RegisterExecutor → IDeviceClient.readWords()/readBits()
+    → DataCollector.collectAllFields() → buildBatches() → RegisterExecutor.readBatch() → IDeviceClient.readWords()/readBits()
     → RegisterTable.updateUnifiedRegister() 갱신
     → DataCollector.flushWrites() → WriteRequest 큐 처리
     → DeviceList.updateStatus() (폴링 성공/실패 상태 갱신)
@@ -242,7 +242,7 @@ swr/
 
 1. 시작 시 `DeviceDatabase`가 SQLite DB를 직접 조회하여 `DeviceInfo`(연결 정보 + 레지스터 목록 + 폴링 설정)를 반환한다.
 2. `DeviceList`가 목록을 메모리에 캐시하고, `PollingManager`가 Serial/TCP 분류 후 Worker 스레드를 시작한다.
-3. 각 Worker는 폴링 주기마다 `DataCollector`를 통해 `RegisterExecutor` → `IDeviceClient`로 통신을 수행한다.
+3. 각 Worker는 폴링 주기마다 `DataCollector.collectAllFields()`를 호출한다. 내부에서 연속 주소 필드를 배치로 묶어 `RegisterExecutor.readBatch()` → `IDeviceClient`로 최소 횟수의 통신을 수행한다.
 4. 읽어온 데이터는 `RegisterTable.updateUnifiedRegister()`로 전달되어 스케일 적용, 범위 검사 후 실시간 상태가 갱신된다.
 5. 웹 UI에서 API 요청이 오면 `ApiServer`(QHttpServer)가 수신하여 `DeviceDatabase` 또는 `RegisterTable`을 조회하고 JSON으로 응답한다.
 6. 장비 등록/수정/삭제 시 `DeviceDatabase`와 `DeviceList` 양쪽을 동기화(`syncAddDevice` 등)한다.

@@ -31,11 +31,11 @@
     - `→ disabled` : 그대로 유지
   - 마지막 active admin → locked/disabled 전환 시 409 차단 (최소 1명 active admin 보장)
 
-- [ ] **4. 로그인 보안 정책 저장 / 조회**
-  - `AppConfig`에 `LoginSecurityConfig` 추가 (maxFailedAttempts, lockDurationMinutes, sessionTimeoutMinutes, minPasswordLength)
+- [x] **4. 로그인 보안 정책 저장 / 조회**
+  - `AppConfig`에 `LoginSecurityConfig` 추가 (maxFailedAttempts, sessionTimeoutMinutes, minPasswordLength, autoLogout)
   - `GET /api/users/security-policy`
-  - `PUT /api/users/security-policy`
-  - `validateUser()`에서 정책값 참조 (현재는 하드코딩 5회/10분)
+  - `PUT /api/users/security-policy` (각 필드 범위 검증 포함)
+  - `validateUser()`에서 정책값 참조 (런타임에 config 파일에서 로드)
 
 - [ ] **5. 역할 기반 접근 제어 (RBAC)**
   - `isAuthenticated()` 외에 `hasRole()` 헬퍼 추가

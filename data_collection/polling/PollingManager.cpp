@@ -4,9 +4,11 @@
 namespace DataCollection {
 namespace Polling {
 
-PollingManager::PollingManager(std::shared_ptr<Store::RegisterTable> table,
+PollingManager::PollingManager(const QString &dbPath,
+                               std::shared_ptr<Store::RegisterTable> table,
                                std::shared_ptr<Store::DeviceList> deviceList)
-    : m_table(std::move(table))
+    : m_dbPath(dbPath)
+    , m_table(std::move(table))
     , m_deviceList(std::move(deviceList))
 {
 }
@@ -25,6 +27,10 @@ bool PollingManager::start(QString& error)
 
     m_table->clear();
 
+    m_logQueue  = std::make_unique<PollLogQueue>();
+    m_logWriter = std::make_unique<LogWriterThread>(m_dbPath, m_logQueue.get());
+    m_logWriter->start();
+
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
     QList<Model::DeviceInfo> serialDevices;
@@ -40,14 +46,14 @@ bool PollingManager::start(QString& error)
     }
 
     if (!serialDevices.isEmpty()) {
-        m_serialWorker = std::make_unique<SerialWorker>(
-            serialDevices, m_table, m_deviceList);
+        m_serialWorker = std::make_unique<SerialWorker>(serialDevices, m_table, m_deviceList, m_logQueue.get());
         m_serialWorker->start();
+        
         Util::Logger::info(QStringLiteral("SerialWorker started: %1 device(s)").arg(serialDevices.size()));
     }
 
     for (const Model::DeviceInfo &d : tcpDevices) {
-        auto *worker = new TcpWorker(d, m_table, m_deviceList);
+        auto *worker = new TcpWorker(d, m_table, m_deviceList, m_logQueue.get());
         m_tcpWorkers.append(worker);
         worker->start();
     }
@@ -74,6 +80,13 @@ void PollingManager::stop()
         delete w;
     }
     m_tcpWorkers.clear();
+
+    // 워커 종료 후 로그 라이터 중단 (잔여 큐 플러시 보장)
+    if (m_logWriter) {
+        m_logWriter->stop();
+        m_logWriter.reset();
+    }
+    m_logQueue.reset();
 
     m_running = false;
     Util::Logger::info(QStringLiteral("Polling stopped."));

@@ -185,7 +185,7 @@ int main(int argc, char *argv[])
     //-----------------------------------------------------------------//
     // Start Polling Manager
     //-----------------------------------------------------------------//
-    DCPoll::PollingManager pollingManager(registerTable, deviceList);
+    DCPoll::PollingManager pollingManager(dbFilePath, registerTable, deviceList);
 
     QString pollError;
     if(!pollingManager.start(pollError)){

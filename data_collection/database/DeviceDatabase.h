@@ -50,6 +50,7 @@ public:
     LoginResult validateUser(const QString &username,
                              const QString &password,
                              const QString &ip,
+                             int maxFailedAttempts,
                              QString &error);
 
     // Login History
@@ -58,6 +59,9 @@ public:
                                                       const QString &username,
                                                       QString &error) const;
     bool deleteLoginHistory(const QString &username, QString &error);
+
+    // Poll Log
+    QList<Model::PollLogEntry> fetchPollLog(int deviceId, int limit, QString &error) const;
 
     // Insert Sample Data
     bool insertRefrigerationSampleDevices(QString &error);

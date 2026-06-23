@@ -2,17 +2,21 @@
 #include "../processor/DataCollector.h"
 #include "../../utils/Logger.h"
 
+#include <QDateTime>
+
 namespace DataCollection {
 namespace Polling {
 
 TcpWorker::TcpWorker(Model::DeviceInfo device,
                      std::shared_ptr<Store::RegisterTable> table,
                      std::shared_ptr<Store::DeviceList> deviceList,
+                     PollLogQueue *logQueue,
                      QObject *parent)
     : QThread(parent)
     , m_device(std::move(device))
     , m_table(std::move(table))
     , m_deviceList(std::move(deviceList))
+    , m_logQueue(logQueue)
 {
 }
 
@@ -29,35 +33,43 @@ void TcpWorker::run()
     Processor::DataCollector collector(m_device, m_deviceList);
     int consecutiveErrors = 0;
 
+    if (m_device.registers.isEmpty()) {
+        qWarning("TcpWorker: device %d has no registers, skipping.", m_device.id);
+        return;
+    }
+
     while(m_running) {
         const qint64 pollStart = QDateTime::currentMSecsSinceEpoch();
         bool allOk = true;
         QString lastError;
 
-        for(const Model::RegisterField& field : m_device.registers){
-            if(!m_running) break;
+        //-----------------------------------------------------------------------//
+        // Read Batch of fields for the device
+        // collectAllFields() → buildBatches() → readBatch()  → readWords()(FC03)
+        //-----------------------------------------------------------------------//
+        const QList<Processor::DataCollector::FieldResult> results = collector.collectAllFields();
 
-            QVector<quint16> regValues;
-            QVector<bool> coilValues;
-            QString error;
+        for (int fi = 0; fi < m_device.registers.size(); ++fi) {
+            if (!m_running) break;
 
-            const bool ok = collector.collectField(field, regValues, coilValues, error);
-            
+            const Processor::DataCollector::FieldResult &r = results.at(fi);
+            const Model::RegisterField &field = m_device.registers.at(fi);
+
             m_table->updateUnifiedRegister(
-                m_device.id, 
-                field, 
-                regValues, 
-                coilValues, 
-                ok, 
-                error, 
+                m_device.id,
+                field,
+                r.registerValues,
+                r.coilValues,
+                r.ok,
+                r.error,
                 m_device.polling.intervalMs);
 
-            if (!ok) {
+            if (!r.ok) {
                 allOk = false;
-                lastError = error;
+                lastError = r.error;
 
                 qWarning("TCP poll failed [device %d, field %s]: %s",
-                         m_device.id, qPrintable(field.tagName), qPrintable(error));
+                         m_device.id, qPrintable(field.tagName), qPrintable(r.error));
             }
         }
 
@@ -80,6 +92,21 @@ void TcpWorker::run()
         //                        .arg(status.lastError));
 
         m_deviceList->updateStatus(m_device.id, status);
+
+        if (m_logQueue) {
+            Model::PollLogEntry entry;
+            entry.deviceId      = m_device.id;
+            entry.deviceName    = m_device.name;
+            entry.timestamp     = QDateTime::fromMSecsSinceEpoch(pollStart)
+                                      .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            entry.success       = allOk;
+            entry.durationMs    = status.lastPollDurationMs;
+            entry.registerCount = m_device.registers.size();
+            entry.message       = allOk
+                ? QStringLiteral("Read %1 registers OK").arg(m_device.registers.size())
+                : lastError;
+            m_logQueue->push(entry);
+        }
 
         //-------------------------------------------------//
         // Write, If Write Queue is not empty.

@@ -4,6 +4,8 @@
 #include "../store/DeviceList.h"
 #include "SerialWorker.h"
 #include "TcpWorker.h"
+#include "PollLogQueue.h"
+#include "LogWriterThread.h"
 
 namespace DataCollection {
 namespace Polling {
@@ -11,7 +13,8 @@ namespace Polling {
 class PollingManager
 {
 public:
-    PollingManager(std::shared_ptr<Store::RegisterTable> table,
+    PollingManager(const QString &dbPath,
+                   std::shared_ptr<Store::RegisterTable> table,
                    std::shared_ptr<Store::DeviceList> deviceList);
 
     ~PollingManager();
@@ -21,8 +24,12 @@ public:
     bool isRunning() const;
 
 private:
+    QString m_dbPath;
     std::shared_ptr<Store::RegisterTable> m_table;
     std::shared_ptr<Store::DeviceList> m_deviceList;
+
+    std::unique_ptr<PollLogQueue>    m_logQueue;
+    std::unique_ptr<LogWriterThread> m_logWriter;
 
     std::unique_ptr<SerialWorker> m_serialWorker;
     QList<TcpWorker *> m_tcpWorkers;
