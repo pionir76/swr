@@ -4,6 +4,7 @@
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDebug>
+#include "../../utils/Logger.h"
 
 namespace DataCollection {
 namespace Polling {
@@ -38,14 +39,24 @@ void LogWriterThread::run()
 
         m_running = true;
 
+        Util::Logger::info(QStringLiteral("Polling LogWriter Thread started, writing to DB: %1").arg(m_dbPath));
+
+        // Every 500ms, pop all entries from the queue and write them to the database
         while (m_running) {
             msleep(500);
+
+            //----------------------------------------------------------------//
+            // Pop all entries from the queue and write them to the database
+            //----------------------------------------------------------------//
             const QList<Model::PollLogEntry> entries = m_queue->popAll();
             if (!entries.isEmpty())
                 writeEntries(entries);
         }
 
-        // 종료 전 남은 항목 플러시
+        //----------------------------------------------------------------//
+        // Pop any remaining entries from the queue and write 
+        // them to the database before exiting
+        //----------------------------------------------------------------//
         const QList<Model::PollLogEntry> remaining = m_queue->popAll();
         if (!remaining.isEmpty())
             writeEntries(remaining);
@@ -56,6 +67,9 @@ void LogWriterThread::run()
     QSqlDatabase::removeDatabase(m_connName);
 }
 
+//----------------------------------------------------------------//
+// Writes a batch of PollLogEntry items to the database.
+//----------------------------------------------------------------//
 void LogWriterThread::writeEntries(const QList<Model::PollLogEntry> &entries)
 {
     QSqlDatabase db = QSqlDatabase::database(m_connName);
@@ -78,12 +92,18 @@ void LogWriterThread::writeEntries(const QList<Model::PollLogEntry> &entries)
         if (!ins.exec())
             qWarning("LogWriterThread: INSERT failed: %s", qPrintable(ins.lastError().text()));
 
+        //----------------------------------------------------------------//
+        // Retain only the most recent 100 entries per device 
+        //to prevent the log table from growing indefinitely
+        //----------------------------------------------------------------//
         QSqlQuery del(db);
         del.prepare(
-            "DELETE FROM device_poll_log "
-            "WHERE device_id = ? AND id NOT IN ("
-            "  SELECT id FROM device_poll_log WHERE device_id = ? ORDER BY id DESC LIMIT 100"
-            ")"
+            QStringLiteral(
+                "DELETE FROM device_poll_log "
+                "WHERE device_id = ? AND id NOT IN ("
+                "  SELECT id FROM device_poll_log WHERE device_id = ? ORDER BY id DESC LIMIT %1"
+                ")"
+            ).arg(Model::kPollLogMaxEntries)
         );
         del.addBindValue(e.deviceId);
         del.addBindValue(e.deviceId);

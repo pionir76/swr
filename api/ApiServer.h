@@ -43,6 +43,9 @@ private:
     QHttpServerResponse handleLogout(const QHttpServerRequest &request);
     QHttpServerResponse handleSession(const QHttpServerRequest &request);
 
+    // Dashboard
+    QHttpServerResponse handleGetDashboard(const QHttpServerRequest &request);
+
     // Polling Control
     QHttpServerResponse handleGetPollingStatus(const QHttpServerRequest &request);
     QHttpServerResponse handleStartPolling(const QHttpServerRequest &request);

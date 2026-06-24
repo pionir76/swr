@@ -34,7 +34,6 @@ void TcpWorker::run()
     int consecutiveErrors = 0;
 
     if (m_device.registers.isEmpty()) {
-        qWarning("TcpWorker: device %d has no registers, skipping.", m_device.id);
         return;
     }
 

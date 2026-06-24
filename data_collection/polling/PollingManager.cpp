@@ -46,14 +46,23 @@ bool PollingManager::start(QString& error)
     }
 
     if (!serialDevices.isEmpty()) {
-        m_serialWorker = std::make_unique<SerialWorker>(serialDevices, m_table, m_deviceList, m_logQueue.get());
+        m_serialWorker = std::make_unique<SerialWorker>(
+            serialDevices, 
+            m_table, 
+            m_deviceList, 
+            m_logQueue.get());
+
         m_serialWorker->start();
         
         Util::Logger::info(QStringLiteral("SerialWorker started: %1 device(s)").arg(serialDevices.size()));
     }
 
     for (const Model::DeviceInfo &d : tcpDevices) {
-        auto *worker = new TcpWorker(d, m_table, m_deviceList, m_logQueue.get());
+        auto *worker = new TcpWorker(
+            d, m_table, 
+            m_deviceList, 
+            m_logQueue.get());
+
         m_tcpWorkers.append(worker);
         worker->start();
     }
@@ -75,6 +84,7 @@ void PollingManager::stop()
         m_serialWorker.reset();
     }
 
+    // Stop and delete all TcpWorker instances
     for (TcpWorker *w : m_tcpWorkers) {
         w->stop();
         delete w;

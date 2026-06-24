@@ -11,15 +11,24 @@ namespace Polling {
 
 class PollLogQueue {
 public:
-    void push(const Model::PollLogEntry &entry) {
+    //--------------------------------------------------//
+    // Pushes a new PollLogEntry into the queue.
+    //--------------------------------------------------//
+    void push(const Model::PollLogEntry &entry) 
+    {
         QMutexLocker locker(&m_mutex);
         m_queue.enqueue(entry);
     }
 
-    QList<Model::PollLogEntry> popAll() {
+    //--------------------------------------------------//
+    // Pops all entries from the queue and returns them as a list.
+    //--------------------------------------------------//
+    QList<Model::PollLogEntry> popAll() 
+    {
         QMutexLocker locker(&m_mutex);
         QList<Model::PollLogEntry> batch;
         batch.reserve(m_queue.size());
+        
         while (!m_queue.isEmpty())
             batch.append(m_queue.dequeue());
         return batch;

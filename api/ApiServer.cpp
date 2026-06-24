@@ -84,6 +84,10 @@ void ApiServer::setupRoutes()
     m_server.route("/api/session", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleSession(req); });
 
+    // Dashboard
+    m_server.route("/api/dashboard", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetDashboard(req); });
+
     // Polling Control
     m_server.route("/api/polling/status", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetPollingStatus(req); });
@@ -314,6 +318,157 @@ QHttpServerResponse ApiServer::handleSession(const QHttpServerRequest &request)
 // ---------------------------------------------------------------------------
 // Polling Control Handler
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Dashboard — unified snapshot for the dashboard page
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    static constexpr int kDashPollLogLimit  = 20;
+    static constexpr int kDashLogLimit      = 20;
+    static constexpr int kDashRealtimeLimit = 20;
+
+    // ── 1. Devices + KPI ────────────────────────────────────────────────────
+    const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
+
+    int okCount      = 0;
+    int errorCount   = 0;
+    int unknownCount = 0;
+
+    QJsonArray devArr;
+    for (const Model::DeviceInfo &d : devices) {
+        QString stateStr;
+        switch (d.status.state) {
+        case Model::DeviceInfo::Status::State::Ok:
+            stateStr = QStringLiteral("ok");
+            ++okCount;
+            break;
+        case Model::DeviceInfo::Status::State::Error:
+            stateStr = QStringLiteral("error");
+            ++errorCount;
+            break;
+        default:
+            stateStr = QStringLiteral("unknown");
+            ++unknownCount;
+            break;
+        }
+
+        QJsonObject obj;
+        obj["id"]               = d.id;
+        obj["name"]             = d.name;
+        obj["deviceCode"]       = d.deviceCode;
+        obj["connType"]         = Model::connectionTypeToString(d.connection.type);
+        obj["protocol"]         = Model::protocolToString(d.connection.protocol);
+        obj["state"]            = stateStr;
+        obj["lastPollDurationMs"] = d.status.lastPollDurationMs;
+        obj["consecutiveErrors"]  = d.status.consecutiveErrors;
+        obj["lastError"]          = d.status.lastError;
+        devArr.append(obj);
+    }
+
+    // ── 2. Poll log (all devices, newest first) ─────────────────────────────
+    QString pollLogError;
+    const QList<Model::PollLogEntry> pollLogEntries =
+        m_db->fetchPollLog(-1, kDashPollLogLimit, pollLogError);
+
+    int recentFailCount = 0;
+    QJsonArray pollLogArr;
+    for (const Model::PollLogEntry &e : pollLogEntries) {
+        if (!e.success)
+            ++recentFailCount;
+
+        QJsonObject obj;
+        obj["id"]            = e.id;
+        obj["deviceId"]      = e.deviceId;
+        obj["deviceName"]    = e.deviceName;
+        obj["timestamp"]     = e.timestamp;
+        obj["success"]       = e.success;
+        obj["durationMs"]    = e.durationMs;
+        obj["registerCount"] = e.registerCount;
+        obj["message"]       = e.message;
+        pollLogArr.append(obj);
+    }
+
+    // ── 3. Realtime registers (top N, newest by lastUpdated) ────────────────
+    const QList<Model::UnifiedRegister> allRegs = m_registerTable->unifiedRegisters();
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+
+    QJsonArray realtimeArr;
+    int realtimeCount = 0;
+    for (const Model::UnifiedRegister &r : allRegs) {
+        if (realtimeCount >= kDashRealtimeLimit)
+            break;
+
+        Model::DataQuality quality = Model::DataQuality::Bad;
+        if (r.lastUpdated.isValid() && r.pollingIntervalMs > 0) {
+            const qint64 elapsedMs = r.lastUpdated.msecsTo(now);
+            if (elapsedMs < r.pollingIntervalMs * 3 / 2)
+                quality = Model::DataQuality::Good;
+            else if (elapsedMs < r.pollingIntervalMs * 3)
+                quality = Model::DataQuality::Normal;
+        }
+
+        QJsonObject obj;
+        obj["id"]           = r.id;
+        obj["tagName"]      = r.tagName;
+        obj["displayName"]  = r.displayName;
+        obj["deviceId"]     = r.deviceId;
+        obj["address"]      = r.deviceAddress;
+        obj["sourceType"]   = Model::registerTypeToString(r.sourceType);
+        obj["unit"]         = r.unit;
+        obj["scaledValue"]  = r.scaledValue;
+        obj["scale"]        = r.scale;
+        obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
+        obj["bitLabels"]    = r.bitLabels;
+        obj["readOnly"]     = r.readOnly;
+        obj["isValid"]      = r.isValid;
+        obj["outOfRange"]   = r.outOfRange;
+        obj["quality"]      = Model::dataQualityToString(quality);
+        obj["lastUpdated"]  = r.lastUpdated.toString(Qt::ISODate);
+        obj["errorMessage"] = r.errorMessage;
+        realtimeArr.append(obj);
+        ++realtimeCount;
+    }
+
+    // ── 4. System logs (newest first) ───────────────────────────────────────
+    QString logError;
+    const QList<Util::LogEntry> logEntries =
+        Util::Logger::fetch(kDashLogLimit, {}, {}, {}, logError);
+
+    QJsonArray logArr;
+    for (const Util::LogEntry &e : logEntries) {
+        QJsonObject obj;
+        obj["id"]        = e.id;
+        obj["timestamp"] = e.timestamp.toString(Qt::ISODate);
+        obj["level"]     = Util::logLevelToString(e.level);
+        obj["message"]   = e.message;
+        logArr.append(obj);
+    }
+
+    // ── 5. Compose response ─────────────────────────────────────────────────
+    QJsonObject kpi;
+    kpi["totalDevices"]    = devices.size();
+    kpi["okDevices"]       = okCount;
+    kpi["errorDevices"]    = errorCount;
+    kpi["unknownDevices"]  = unknownCount;
+    kpi["recentFailCount"] = recentFailCount;
+
+    QJsonObject polling;
+    polling["running"] = m_pollingManager->isRunning();
+
+    QJsonObject resp;
+    resp["polling"]           = polling;
+    resp["kpi"]               = kpi;
+    resp["devices"]           = devArr;
+    resp["realtimeRegisters"] = realtimeArr;
+    resp["pollLog"]           = pollLogArr;
+    resp["logs"]              = logArr;
+
+    return QHttpServerResponse(resp);
+}
+
 QHttpServerResponse ApiServer::handleGetPollingStatus(const QHttpServerRequest &request)
 {
     if (!isAuthenticated(request))
@@ -1372,6 +1527,10 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
     return QHttpServerResponse(resp);
 }
 
+
+// ---------------------------------------------------------------------------
+// Poll Log Handler
+// ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetDevicePollLog(const QHttpServerRequest &request)
 {
     if (!isAuthenticated(request))
@@ -1383,11 +1542,12 @@ QHttpServerResponse ApiServer::handleGetDevicePollLog(const QHttpServerRequest &
                          : -1;
     const int limit    = query.hasQueryItem(QStringLiteral("limit"))
                          ? query.queryItemValue(QStringLiteral("limit")).toInt()
-                         : 200;
+                         : Model::kPollLogMaxEntries;
 
     QString error;
-    const QList<DataCollection::Model::PollLogEntry> entries =
-        m_db->fetchPollLog(deviceId, limit, error);
+
+    // Fetch poll log entries from the database
+    const QList<DataCollection::Model::PollLogEntry> entries = m_db->fetchPollLog(deviceId, limit, error);
 
     if (!error.isEmpty()) {
         QJsonObject err;

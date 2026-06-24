@@ -124,6 +124,10 @@ QString RegisterTable::fieldKey(int deviceId, const Model::RegisterField &field)
 
 double RegisterTable::computeScaledValue(const Model::UnifiedRegister &entry) const
 {
+    //-----------------------------------------------------------------//
+    // If the register is a holding/input/word register, compute 
+    // the scaled value based on the raw register values
+    //-----------------------------------------------------------------//
     if (!entry.rawRegisters.isEmpty()) {
         quint64 combined = 0;
         if (entry.rawRegisters.size() > 1) {
@@ -146,6 +150,11 @@ double RegisterTable::computeScaledValue(const Model::UnifiedRegister &entry) co
         }
         return static_cast<double>(combined) * entry.scale;
     }
+
+    //-----------------------------------------------------------------//
+    // If the register is a coil or bit register, compute 
+    // the scaled value based on the number of true bits
+    //-----------------------------------------------------------------//
     if (!entry.rawCoils.isEmpty()) {
         if (entry.rawCoils.size() == 1) {
             return entry.rawCoils.first() ? 1.0 * entry.scale : 0.0;

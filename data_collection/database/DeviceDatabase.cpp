@@ -47,7 +47,12 @@ bool DeviceDatabase::open(const QString& dbPath, QString& error)
         return false;
     }
 
-    return true;
+    //-----------------------------------------------------------//
+    // Initialize the database schema if it doesn't exist
+    // No problem if the tables already exist, 
+    // as CREATE TABLE IF NOT EXISTS will not overwrite existing tables.
+    //-----------------------------------------------------------//
+    return initSchema(error);
 }
 
 void DeviceDatabase::close()

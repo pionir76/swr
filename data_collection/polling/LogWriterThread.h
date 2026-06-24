@@ -8,6 +8,12 @@
 namespace DataCollection {
 namespace Polling {
 
+//--------------------------------------------------------------------------------//
+// LogWriterThread is a QThread that continuously pops PollLogEntry items from a
+// PollLogQueue and writes them to a SQLite database. It runs in its own thread and
+// ensures that log entries are written to the database in a thread-safe manner.
+// Every 500ms, pop all entries from the queue and write them to the database
+//--------------------------------------------------------------------------------//
 class LogWriterThread : public QThread {
     Q_OBJECT
 public:
