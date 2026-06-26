@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QDateTime>
 #include <QCryptographicHash>
+#include <QJsonObject>
 
 namespace DataCollection {
 namespace Database{
@@ -116,7 +117,6 @@ bool DeviceDatabase::resetSchema(QString& error)
         QStringLiteral("DROP TABLE IF EXISTS users"),
         QStringLiteral("DROP TABLE IF EXISTS login_history"),
 
-        QStringLiteral("DROP TABLE IF EXISTS device_poll_log"),
         QStringLiteral("DROP TABLE IF EXISTS trends"),
         QStringLiteral("DROP TABLE IF EXISTS hmi_layouts"),
         QStringLiteral("DROP TABLE IF EXISTS sessions")
@@ -261,23 +261,6 @@ bool DeviceDatabase::initSchema(QString& error)
             "ON login_history(username)"
         ),
 
-        QStringLiteral(
-            "CREATE TABLE IF NOT EXISTS device_poll_log ("
-            "  id             INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  device_id      INTEGER NOT NULL,"
-            "  device_name    TEXT    NOT NULL,"
-            "  timestamp      TEXT    NOT NULL,"
-            "  success        INTEGER NOT NULL DEFAULT 0,"
-            "  duration_ms    INTEGER NOT NULL DEFAULT -1,"
-            "  register_count INTEGER NOT NULL DEFAULT 0,"
-            "  message        TEXT    NOT NULL DEFAULT ''"
-            ")"
-        ),
-
-        QStringLiteral(
-            "CREATE INDEX IF NOT EXISTS idx_poll_log_device "
-            "ON device_poll_log(device_id, id)"
-        )
     };
 
     if (!db.transaction()) {
@@ -300,6 +283,34 @@ bool DeviceDatabase::initSchema(QString& error)
         db.rollback();
         return false;
     }
+
+    //-----------------------------------------------------------//
+    // ensure default admin account exists
+    // set password to "1234" if not exists and id is 0
+    //-----------------------------------------------------------//
+    QSqlQuery chk(db);
+    chk.prepare(QStringLiteral("SELECT COUNT(*) FROM users WHERE username = 'admin'"));
+    if (!chk.exec() || !chk.next()) {
+        error = chk.lastError().text();
+        return false;
+    }
+    if (chk.value(0).toInt() == 0) {
+        const QString hash = QString::fromLatin1(
+            QCryptographicHash::hash(QByteArrayLiteral("1234"),
+                                     QCryptographicHash::Sha256).toHex());
+        QSqlQuery ins(db);
+        ins.prepare(QStringLiteral(
+            "INSERT INTO users "
+            "(id, username, display_name, description, password_hash, role, status) "
+            "VALUES (0, 'admin', 'Administrator', 'Default administrator account', ?, 'admin', 'active')"
+        ));
+        ins.addBindValue(hash);
+        if (!ins.exec()) {
+            error = ins.lastError().text();
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1048,6 +1059,156 @@ bool DeviceDatabase::insertSampleRegistersForDevice(int deviceId, Model::DeviceC
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Restore
+// ---------------------------------------------------------------------------
+bool DeviceDatabase::restoreData(bool restoreDevices,
+                                 const QJsonArray &devices,
+                                 const QJsonArray &registers,
+                                 bool restoreUsers,
+                                 const QJsonArray &users,
+                                 QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return false;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery q(db);
+
+    if (restoreDevices) {
+        // 기존 devices 전체 삭제 (CASCADE → registers 자동 삭제)
+        if (!q.exec(QStringLiteral("DELETE FROM devices"))) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
+
+        // devices 삽입 + old_id → new_id 매핑
+        QMap<int, int> idMap;
+
+        for (const QJsonValue &v : devices) {
+            const QJsonObject obj  = v.toObject();
+            const int oldId        = obj[QLatin1String("id")].toInt();
+            const QJsonObject conn = obj[QLatin1String("connection")].toObject();
+            const QJsonObject poll = obj[QLatin1String("polling")].toObject();
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO devices "
+                "(device_code, name, display_name, conn_type, ip_address, tcp_port, "
+                "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(obj[QLatin1String("deviceCode")].toString());
+            q.addBindValue(obj[QLatin1String("name")].toString());
+            q.addBindValue(obj[QLatin1String("displayName")].toString());
+            q.addBindValue(conn[QLatin1String("type")].toString());
+            q.addBindValue(conn[QLatin1String("ipAddress")].toString());
+            q.addBindValue(conn[QLatin1String("tcpPort")].toInt(502));
+            q.addBindValue(conn[QLatin1String("slaveId")].toInt(1));
+            q.addBindValue(conn[QLatin1String("timeoutMs")].toInt(5000));
+            q.addBindValue(poll[QLatin1String("intervalMs")].toInt(1000));
+            q.addBindValue(poll[QLatin1String("retryCount")].toInt(3));
+            q.addBindValue(conn[QLatin1String("defaultByteOrder")].toString(QStringLiteral("big")));
+            q.addBindValue(conn[QLatin1String("protocol")].toString());
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+            idMap[oldId] = q.lastInsertId().toInt();
+        }
+
+        // registers 삽입 (deviceId 재매핑)
+        for (const QJsonValue &v : registers) {
+            const QJsonObject obj = v.toObject();
+            const int newDeviceId = idMap.value(obj[QLatin1String("deviceId")].toInt(), -1);
+            if (newDeviceId < 0) continue;
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO registers "
+                "(device_id, name, address, type, read_only, length, unified_register_id, "
+                "display_name, unit, scale, is_signed, min_value, max_value, byte_order, bit_labels) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(newDeviceId);
+            q.addBindValue(obj[QLatin1String("tagName")].toString());
+            q.addBindValue(obj[QLatin1String("address")].toInt());
+            q.addBindValue(obj[QLatin1String("type")].toString());
+            q.addBindValue(obj[QLatin1String("readOnly")].toBool(true) ? 1 : 0);
+            q.addBindValue(obj[QLatin1String("length")].toInt(1));
+            q.addBindValue(obj[QLatin1String("unifiedRegisterId")].toInt(-1));
+            q.addBindValue(obj[QLatin1String("displayName")].toString());
+            q.addBindValue(obj[QLatin1String("unit")].toString());
+            q.addBindValue(obj[QLatin1String("scale")].toDouble(1.0));
+            q.addBindValue(obj[QLatin1String("isSigned")].toBool(false) ? 1 : 0);
+            q.addBindValue(obj[QLatin1String("minValue")].toDouble());
+            q.addBindValue(obj[QLatin1String("maxValue")].toDouble());
+            q.addBindValue(obj[QLatin1String("byteOrder")].toString(QStringLiteral("default")));
+            q.addBindValue(obj[QLatin1String("bitLabels")].toString());
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+    }
+
+    if (restoreUsers) {
+        for (const QJsonValue &v : users) {
+            const QJsonObject obj  = v.toObject();
+            const QString username = obj[QLatin1String("username")].toString();
+            if (username.isEmpty() || username == QLatin1String("admin"))
+                continue;
+
+            QSqlQuery chk(db);
+            chk.prepare(QStringLiteral("SELECT COUNT(*) FROM users WHERE username=?"));
+            chk.addBindValue(username);
+            if (!chk.exec() || !chk.next()) {
+                error = chk.lastError().text();
+                db.rollback();
+                return false;
+            }
+            if (chk.value(0).toInt() > 0) continue;  // 이미 존재하면 스킵
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO users "
+                "(username, display_name, description, password_hash, role, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(username);
+            q.addBindValue(obj[QLatin1String("displayName")].toString());
+            q.addBindValue(obj[QLatin1String("description")].toString());
+            q.addBindValue(obj[QLatin1String("passwordHash")].toString());
+            q.addBindValue(obj[QLatin1String("role")].toString(QStringLiteral("user")));
+            q.addBindValue(obj[QLatin1String("status")].toString(QStringLiteral("active")));
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+    }
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Insert Sample Data
+// ---------------------------------------------------------------------------
+
 bool DeviceDatabase::insertRefrigerationSampleDevices(QString &error)
 {
     if (!isOpen()) {
@@ -1332,44 +1493,61 @@ bool DeviceDatabase::insertRefrigerationSampleDevices(QString &error)
 */
 
 
-QList<Model::PollLogEntry> DeviceDatabase::fetchPollLog(int deviceId, int limit, QString &error) const
+bool DeviceDatabase::factoryReset(QString &error)
 {
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return false;
+    }
+
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return false;
+    }
+
     QSqlQuery q(db);
 
-    if (deviceId >= 0) {
-        q.prepare(
-            "SELECT id, device_id, device_name, timestamp, success, duration_ms, register_count, message "
-            "FROM device_poll_log WHERE device_id = :did ORDER BY id DESC LIMIT :lim"
-        );
-        q.bindValue(QStringLiteral(":did"), deviceId);
-    } else {
-        q.prepare(
-            "SELECT id, device_id, device_name, timestamp, success, duration_ms, register_count, message "
-            "FROM device_poll_log ORDER BY id DESC LIMIT :lim"
-        );
+    //----------------------------------------------------//
+    // Delete All Devices
+    //----------------------------------------------------//
+    if (!q.exec(QStringLiteral("DELETE FROM devices"))) {
+        error = q.lastError().text();
+        db.rollback();
+        return false;
     }
-    q.bindValue(QStringLiteral(":lim"), limit > 0 ? limit : 200);
 
+    //----------------------------------------------------//
+    // Delete All Users (except admin)
+    //----------------------------------------------------//
+    if (!q.exec(QStringLiteral("DELETE FROM users WHERE id != 0"))) {
+        error = q.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    //----------------------------------------------------//
+    // Reset Admin Password to Default (1234)
+    //----------------------------------------------------//
+    const QString hash = QString::fromLatin1(
+        QCryptographicHash::hash(QByteArrayLiteral("1234"),
+                                 QCryptographicHash::Sha256).toHex());
+
+    q.prepare(QStringLiteral("UPDATE users SET password_hash=? WHERE id=0"));
+    q.addBindValue(hash);
     if (!q.exec()) {
         error = q.lastError().text();
-        return {};
+        db.rollback();
+        return false;
     }
 
-    QList<Model::PollLogEntry> result;
-    while (q.next()) {
-        Model::PollLogEntry e;
-        e.id            = q.value(0).toLongLong();
-        e.deviceId      = q.value(1).toInt();
-        e.deviceName    = q.value(2).toString();
-        e.timestamp     = q.value(3).toString();
-        e.success       = q.value(4).toInt() != 0;
-        e.durationMs    = q.value(5).toInt();
-        e.registerCount = q.value(6).toInt();
-        e.message       = q.value(7).toString();
-        result.append(e);
+    if (!db.commit()) {
+        error = db.lastError().text();
+        db.rollback();
+        return false;
     }
-    return result;
+
+    return true;
 }
 
 } // namespace Database

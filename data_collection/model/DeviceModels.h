@@ -158,25 +158,6 @@ struct LoginHistoryEntry {
     QString ip;
 };
 
-//----------------------------------------------------------------//
-// maximum number of poll log entries to keep per device in the database
-// When the LogWriterThread writes new entries, it will delete 
-// older entries beyond this limit.
-//----------------------------------------------------------------//
-constexpr int kPollLogMaxEntries = 100;
-
-struct PollLogEntry {
-    qint64  id            = -1;
-    int     deviceId      = -1;
-    QString deviceName;
-    QString timestamp;
-    bool    success       = false;
-    int     durationMs    = -1;
-    int     registerCount = 0;
-    QString message;
-};
-
-
 //--------------------------------------------------------------------//
 // Helper
 //--------------------------------------------------------------------//

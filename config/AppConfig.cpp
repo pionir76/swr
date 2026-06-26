@@ -31,7 +31,7 @@ AppConfig factoryDefaultConfig()
     eth1.role      = QStringLiteral("service");
     eth1.enabled   = true;
     eth1.mode      = QStringLiteral("static");
-    eth1.ipAddress = QStringLiteral("192.168.0.151");
+    eth1.ipAddress = QStringLiteral("192.168.1.150");
     eth1.netmask   = QStringLiteral("255.255.255.0");
     eth1.gateway   = QStringLiteral("");
     eth1.dns       = QStringLiteral("");

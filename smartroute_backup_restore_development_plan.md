@@ -11,7 +11,6 @@
 - 장비 목록, 레지스터 목록, 시스템 설정을 안전하게 이관한다.
 - 네트워크 설정과 사용자 계정처럼 장비 고유성이 강한 항목은 기본 복원 대상에서 제외한다.
 - 복원 전 파일 검증과 미리보기 단계를 제공한다.
-- 적용 전 현재 설정을 자동 백업한다.
 - DB 적용은 transaction 기반으로 처리하고 실패 시 rollback한다.
 - 복원 완료 후 재시작 필요 여부를 웹 화면에 명확히 표시한다.
 
@@ -73,11 +72,12 @@ swr_backup_20260624_102431.zip
 ├── config.json
 ├── devices.json
 ├── registers.json
+├── users.json
+├── hmi.json
 └── checksum.sha256
 ```
 
-현재 개발 범위에서는 **폴링 설정**과 **HMI 설정**은 별도 백업 항목으로 포함하지 않는다.  
-현재 별도로 관리할 내용이 없으므로 백업/복원 대상에서 제외한다.
+현재 개발 범위에서는 **HMI 설정**은 현재는 빈 데이터로 저장한다. (사양 및 구현이 미완료 이므로)
 
 ---
 
@@ -91,6 +91,8 @@ swr_backup_20260624_102431.zip
 | `config.json` | 시스템 설정 정보 |
 | `devices.json` | 장비 목록 |
 | `registers.json` | 레지스터 목록 |
+| `users.json` | 사용자 목록 (admin 제외) |
+| `hmi.json` | HMI 디자인 스케치 정보 (현재 빈 데이터) |
 | `checksum.sha256` | 백업 파일 무결성 검증 정보 |
 
 ### 4.2 제외 대상
@@ -99,8 +101,6 @@ swr_backup_20260624_102431.zip
 
 | 항목 | 제외 이유 |
 |---|---|
-| 폴링 설정 | 현재 별도 설정 항목 없음 |
-| HMI 설정 | 현재 별도 설정 항목 없음 |
 | 런타임 상태 | 다른 장비에 복원할 의미 없음 |
 | 현재 측정값 | 실시간 데이터이므로 백업 대상 아님 |
 | 폴링 성공/실패 카운트 | 장비별 실행 상태이므로 백업 대상 아님 |
@@ -141,22 +141,16 @@ swr_backup_20260624_102431.zip
 
 ### 5.2 사용자 계정
 
-사용자 계정은 기본 백업/복원 대상에서 제외한다.
+사용자 계정 정책:
+
+- admin 계정은 백업/복원 대상에서 제외한다.
+- admin 계정은 삭제할 수 없으며 항상 id=0으로 고정한다.
+- admin 이외의 사용자 계정은 백업 포함 가능하지만 초기 버전에서는 복원 미지원이다.
 
 이유:
 
 - 현재 장비의 관리자 계정이 덮어씌워질 수 있음
 - 로그인 불가 상태가 발생할 수 있음
-- 장비별 운영자 계정이 다를 수 있음
-- 비밀번호 해시와 계정 정책 이관 시 보안 검토가 필요함
-
-권장 정책:
-
-```text
-사용자 계정은 기본 백업/복원 대상에서 제외
-로그인 보안 정책만 별도 백업 대상으로 검토 가능
-초기 버전에서는 사용자 계정 복원 미지원
-```
 
 ---
 
@@ -173,8 +167,9 @@ swr_backup_20260624_102431.zip
   "createdAt": "2026-06-24T10:24:31",
   "sourceDevice": {
     "hostname": "swr-field-01",
-    "serialNumber": "SWR-0001",
-    "firmwareVersion": "1.2.0",
+    "version": "1",
+    "revision": "0",
+    "zcode": "0",
     "schemaVersion": 3
   },
   "contents": {
@@ -183,8 +178,7 @@ swr_backup_20260624_102431.zip
     "registers": true,
     "network": true,
     "users": false,
-    "polling": false,
-    "hmi": false
+    "hmi": true
   }
 }
 ```
@@ -197,9 +191,10 @@ swr_backup_20260624_102431.zip
 | `backupVersion` | 백업 파일 포맷 버전 |
 | `createdAt` | 백업 생성 시각 |
 | `hostname` | 백업 원본 장비 이름 |
-| `serialNumber` | 백업 원본 장비 식별 번호 |
-| `firmwareVersion` | 백업 생성 당시 펌웨어 버전 |
-| `schemaVersion` | DB 또는 설정 스키마 버전 |
+| `version` | 백업 원본 장비 버전 |
+| `revision` | 백업 원본 장비 리비전 |
+| `zcode` | 백업 원본 장비의 특주 코드 |
+| `schemaVersion` | DB 또는 설정 스키마 버전 (백업 파일의 호환성 검토 키) |
 | `contents` | 백업 파일에 포함된 항목 목록 |
 
 ---
@@ -223,11 +218,6 @@ swr_backup_20260624_102431.zip
 
 ```json
 {
-  "metadata": {
-    "version": 1,
-    "revision": 12,
-    "lastUpdate": "2026-06-24"
-  },
   "system": {
     "hostname": "swr-field-01",
     "ntpServer": "pool.ntp.org"
@@ -293,6 +283,12 @@ swr_backup_20260624_102431.zip
 
 `registers.json`은 각 장비의 레지스터 정의를 가진다.
 
+통합 레지스터 주소(UnifiedRegister.deviceAddress) 포함 여부:
+
+- **포함하지 않는다.**
+- 통합 레지스터 주소는 장비 레지스터 정의(RegisterField)로부터 런타임에 자동 생성되는 파생값이다.
+- 복원 시 장비/레지스터를 재적용하면 통합 레지스터 매핑은 자동으로 재구성된다.
+
 예시:
 
 ```json
@@ -316,23 +312,63 @@ swr_backup_20260624_102431.zip
 }
 ```
 
-필수 정보:
+---
 
-- 장비 ID
-- 태그명
-- 표시명
-- 원본 주소
-- 레지스터 타입
-- 데이터 타입
-- 길이
-- 단위
-- 스케일
-- 읽기/쓰기 모드
-- 활성 여부
+## 10. users.json 구조
+
+`users.json`은 제품에 등록된 사용자 정보이다. admin 계정은 제외한다.
+
+필수 필드:
+
+| 필드 | 타입 | 설명 |
+|---|---|---|
+| `username` | string | 로그인 ID |
+| `displayName` | string | 화면 표시 이름 |
+| `description` | string | 계정 설명 |
+| `passwordHash` | string | SHA-256 해시된 비밀번호 |
+| `role` | string | 권한 (`"admin"` \| `"manager"` \| `"user"`) |
+| `status` | string | 계정 상태 (`"active"` \| `"disabled"` \| `"locked"`) |
+
+제외 필드 (런타임/감사 데이터):
+
+| 필드 | 제외 이유 |
+|---|---|
+| `failedLoginCount` | 런타임 상태, 복원 대상 아님 |
+| `lastLoginAt` | 감사 데이터, 복원 대상 아님 |
+| `lastLoginIp` | 감사 데이터, 복원 대상 아님 |
+| `createdAt` | 복원 시 재생성됨 |
+| `updatedAt` | 복원 시 재생성됨 |
+
+예시:
+
+```json
+{
+  "users": [
+    {
+      "username": "operator1",
+      "displayName": "현장운전원1",
+      "description": "1공장 운전원",
+      "passwordHash": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+      "role": "user",
+      "status": "active"
+    },
+    {
+      "username": "manager1",
+      "displayName": "관리자1",
+      "description": "설비 담당 관리자",
+      "passwordHash": "b3a8e0e1f9ab1bfe3a36f231f676f78bb28a2d0b7a6b0e5b3a5c3c9c2a3e5f7",
+      "role": "manager",
+      "status": "active"
+    }
+  ]
+}
+```
+
+초기 버전에서 사용자 계정 복원은 미지원이다. 백업에는 포함하되 복원 적용 시 무시한다.
 
 ---
 
-## 10. checksum.sha256
+## 11. checksum.sha256
 
 백업 파일 무결성 검증을 위해 각 JSON 파일에 대한 SHA-256 체크섬을 기록한다.
 
@@ -343,6 +379,8 @@ a7b9f2...  manifest.json
 c4d1aa...  config.json
 3f88bc...  devices.json
 91aa32...  registers.json
+b2cc41...  users.json
+00e1f5...  hmi.json
 ```
 
 복원 시 서버는 checksum을 다시 계산하여 파일 변조 여부를 확인한다.
@@ -357,7 +395,7 @@ checksum 불일치 시 복원 차단
 
 ---
 
-## 11. 백업 다운로드 API
+## 12. 백업 다운로드 API
 
 ```http
 GET /api/maintenance/backup
@@ -378,14 +416,16 @@ Content-Disposition: attachment; filename="swr_backup_20260624_102431.zip"
 3. config.json 생성
 4. devices.json 생성
 5. registers.json 생성
-6. checksum.sha256 생성
-7. ZIP 패키지 생성
-8. 파일 다운로드 응답 반환
+6. users.json 생성
+7. hmi.json 생성 (빈 데이터)
+8. checksum.sha256 생성
+9. ZIP 패키지 생성
+10. 파일 다운로드 응답 반환
 ```
 
 ---
 
-## 12. 복원 Upload 절차
+## 13. 복원 Upload 절차
 
 복원은 즉시 적용하지 않는다.
 
@@ -406,7 +446,7 @@ Content-Disposition: attachment; filename="swr_backup_20260624_102431.zip"
 
 ---
 
-## 13. 복원 검증 API
+## 14. 복원 검증 API
 
 ```http
 POST /api/maintenance/restore/validate
@@ -428,12 +468,10 @@ file: swr_backup_20260624_102431.zip
   "backupInfo": {
     "createdAt": "2026-06-24T10:24:31",
     "sourceHostname": "swr-field-01",
-    "firmwareVersion": "1.2.0",
+    "version": "1",
+    "revision": "0",
+    "zcode": "0",
     "schemaVersion": 3
-  },
-  "compatibility": {
-    "firmware": "compatible",
-    "schema": "compatible"
   },
   "items": {
     "config": {
@@ -447,14 +485,18 @@ file: swr_backup_20260624_102431.zip
       "available": true,
       "count": 1284
     },
+    "users": {
+      "available": true,
+      "count": 3
+    },
+    "hmi": {
+      "available": true,
+      "count": 0
+    },
     "network": {
       "available": true,
       "restoreDefault": false,
       "warning": "네트워크 설정 복원 시 IP 충돌이 발생할 수 있습니다."
-    },
-    "users": {
-      "available": false,
-      "reason": "사용자 계정 복원은 지원하지 않습니다."
     }
   },
   "warnings": [
@@ -466,7 +508,7 @@ file: swr_backup_20260624_102431.zip
 
 ---
 
-## 14. 복원 적용 API
+## 15. 복원 적용 API
 
 ```http
 POST /api/maintenance/restore/apply
@@ -482,8 +524,9 @@ Content-Type: application/json
     "config": true,
     "devices": true,
     "registers": true,
-    "network": false,
-    "users": false
+    "hmi": false,
+    "users": false,
+    "network": false
   }
 }
 ```
@@ -500,21 +543,21 @@ Content-Type: application/json
 
 ---
 
-## 15. 복원 적용 서버 처리 흐름
+## 16. 복원 적용 서버 처리 흐름
 
 ```text
 1. restoreId 유효성 확인
 2. 임시 업로드 파일 존재 확인
 3. manifest 재검증
 4. checksum 재검증
-5. 현재 설정 자동 백업 생성
-6. 폴링 동작 중이면 일시 정지 또는 복원 차단
-7. DB transaction 시작
-8. 기존 장비/레지스터 데이터 삭제
-9. 백업 장비/레지스터 데이터 삽입
-10. 선택된 config 항목 적용
-11. transaction commit
-12. 필요 시 restartRequired = true 반환
+5. 폴링 동작 중이면 복원 차단
+6. DB transaction 시작
+7. 기존 장비/레지스터 데이터 삭제
+8. 백업 장비/레지스터 데이터 삽입
+9. 선택된 config 항목 적용
+10. transaction commit
+11. 임시 파일 삭제
+12. restartRequired = true 반환
 ```
 
 실패 시:
@@ -523,63 +566,13 @@ Content-Type: application/json
 1. transaction rollback
 2. 오류 로그 기록
 3. 현재 설정 유지
-4. 프론트에 실패 사유 반환
+4. 임시 파일 삭제
+5. 프론트에 실패 사유 반환
 ```
 
 ---
 
-## 16. 적용 전 현재 설정 자동 백업
-
-복원 적용 전 현재 장비의 설정을 자동으로 백업한다.
-
-저장 위치 예시:
-
-```text
-/var/lib/swr/backups/pre_restore_20260624_103000.zip
-```
-
-정책:
-
-```text
-복원 적용 전 자동 백업 생성
-자동 백업 실패 시 복원 차단
-최근 자동 백업 파일 개수 제한 가능
-예: 최근 5개 유지
-```
-
----
-
-## 17. 복원 방식
-
-초기 버전에서는 전체 교체 방식을 사용한다.
-
-### 17.1 전체 교체 방식
-
-```text
-기존 장비 목록 삭제
-기존 레지스터 목록 삭제
-백업 파일의 장비/레지스터 목록으로 새로 구성
-```
-
-장점:
-
-- 장비 복제 목적에 적합
-- 구현이 단순
-- 백업 원본과 대상 장비 구성이 동일해짐
-
-단점:
-
-- 기존 대상 장비의 개별 수정사항이 사라짐
-
-### 17.2 병합 방식
-
-초기 버전에서는 지원하지 않는다.
-
-병합 방식은 충돌 정책이 복잡하므로 추후 확장 항목으로 둔다.
-
----
-
-## 18. 복원 중 폴링 처리
+## 17. 복원 중 폴링 처리
 
 복원 중에는 장비/레지스터 정보가 변경되므로 폴링 엔진과 충돌할 수 있다.
 
@@ -600,7 +593,7 @@ Content-Type: application/json
 
 ---
 
-## 19. 재시작 정책
+## 18. 재시작 정책
 
 복원 후에는 설정 reload만으로 충분하지 않을 수 있다.
 
@@ -621,9 +614,33 @@ Content-Type: application/json
 
 주의:
 
-- 현재 구현의 `/api/system/restart`가 Qt 애플리케이션 재시작인지, Linux 시스템 재부팅인지 명확히 구분해야 한다.
-- 애플리케이션 재시작이면 “애플리케이션 재시작”으로 표시한다.
-- OS 재부팅이면 “시스템 재부팅”으로 표시한다.
+- `/api/system/restart`는 Qt 애플리케이션 재시작이다.
+- 애플리케이션 재시작이면 웹에 "애플리케이션 재시작"으로 표시한다.
+- OS 재부팅이 필요한 경우(네트워크 설정 변경 등)에는 "시스템 재부팅"으로 표시한다.
+
+---
+
+## 19. 임시 파일 관리
+
+업로드된 복원 파일은 서버의 임시 경로에 저장하고 사용 후 반드시 삭제한다.
+
+정책:
+
+```text
+임시 저장 경로: /tmp/swr_restore/{restoreId}/
+validate 완료 후 임시 파일 유지 (apply 대기)
+apply 완료 또는 실패 후 임시 파일 즉시 삭제
+서버 재시작 시 /tmp/swr_restore/ 하위 전체 정리
+validate 후 일정 시간(예: 30분) 미apply 시 자동 삭제
+```
+
+보안 주의:
+
+```text
+ZIP path traversal 방지 필수
+  - ZIP 내 파일 경로에 ../ 포함 여부 검사
+  - 지정된 임시 경로 외부로 파일이 생성되지 않도록 검증
+```
 
 ---
 
@@ -647,6 +664,7 @@ Content-Type: application/json
 [✓] 장비 목록
 [✓] 레지스터 목록
 [ ] 네트워크 설정
+[ ] HMI 스케치
 [ ] 사용자 계정
 
 경고:
@@ -665,7 +683,7 @@ HMI 설정
 
 ---
 
-## 21. 프론트 상태 흐름
+## 22. 프론트 상태 흐름
 
 복원 UI 상태는 다음 단계로 관리한다.
 
@@ -692,7 +710,7 @@ APPLY_FAILED
 
 ---
 
-## 22. 백엔드 구현 파일 후보
+## 23. 백엔드 구현 파일 후보
 
 현재 프로젝트 구조 기준으로 다음 파일에 기능을 추가할 수 있다.
 
@@ -727,7 +745,7 @@ maintenance/BackupModels.h
 
 ---
 
-## 23. API 목록
+## 24. API 목록
 
 초기 버전에서 필요한 API는 다음과 같다.
 
@@ -739,16 +757,9 @@ GET  /api/maintenance/restore/status
 POST /api/system/restart
 ```
 
-선택 API:
-
-```text
-GET  /api/maintenance/backups
-POST /api/maintenance/rollback
-```
-
 ---
 
-## 24. 개발 단계
+## 25. 개발 단계
 
 ### 단계 1. 백업 데이터 export
 
@@ -780,12 +791,12 @@ POST /api/maintenance/rollback
 ### 단계 4. 복원 apply
 
 - restoreId 확인
-- 현재 설정 자동 백업
 - 폴링 상태 확인
 - DB transaction 시작
 - devices/registers 전체 교체
 - 선택된 config 적용
 - transaction commit
+- 임시 파일 삭제
 - restartRequired 반환
 
 ### 단계 5. 프론트 연동
@@ -810,7 +821,7 @@ POST /api/maintenance/rollback
 
 ---
 
-## 25. 오류 처리 정책
+## 26. 오류 처리 정책
 
 복원 validate 실패 예:
 
@@ -831,82 +842,53 @@ POST /api/maintenance/rollback
 |---|---|
 | restoreId 없음 | 실패 |
 | 임시 파일 만료 | 실패 |
-| 자동 백업 실패 | 복원 차단 |
 | DB transaction 실패 | rollback |
-| config 적용 실패 | rollback 또는 부분 실패 처리 |
+| config 적용 실패 | rollback |
 | 폴링 동작 중 | 복원 차단 |
 
 초기 버전에서는 부분 복원보다 전체 실패 처리가 안전하다.
 
 ---
 
-## 26. 보안 정책
+## 27. 보안 정책
 
 백업/복원 API는 관리자 권한에서만 허용한다.
-
-권장 정책:
 
 ```text
 GET  /api/maintenance/backup              ADMIN only
 POST /api/maintenance/restore/validate    ADMIN only
 POST /api/maintenance/restore/apply       ADMIN only
-POST /api/maintenance/rollback            ADMIN only
 ```
 
-보안 주의:
+보안 주의사항:
 
-- 업로드 파일 크기 제한
-- ZIP path traversal 방지
-- 임시 파일 자동 삭제
-- 사용자 계정 기본 복원 제외
+```text
+- ZIP path traversal 방지 (파일명에 ../ 포함 여부 검사)
+- 임시 파일 사용 후 자동 삭제
+- admin 계정 복원 대상 제외 (id=0 고정)
 - 인증 토큰/세션 정보 백업 금지
-- 관리자 작업 로그 기록
-
----
-
-## 27. 파일 크기 제한
-
-초기 권장값:
-
-```text
-최대 업로드 크기: 20MB
-최대 압축 해제 크기: 100MB
-허용 확장자: .zip
-허용 파일: manifest.json, config.json, devices.json, registers.json, checksum.sha256
-```
-
-ZIP 보안 처리:
-
-```text
-상대 경로만 허용
-../ 포함 경로 차단
-절대 경로 차단
-심볼릭 링크 차단
+- 모든 백업/복원 작업 로그 기록
 ```
 
 ---
 
 ## 28. 로그 기록
 
-다음 이벤트는 로그로 기록한다.
+다음 이벤트는 Logger를 통해 기록한다.
 
-- 백업 다운로드 요청
-- 백업 생성 성공/실패
-- 복원 파일 업로드
-- 복원 validate 성공/실패
-- 복원 apply 시작
-- 자동 백업 생성 성공/실패
-- 복원 성공/실패
-- 복원 후 재시작 요청
-- rollback 수행
-
-로그 예:
-
-```text
-2026-06-24 10:24:31 admin BACKUP_DOWNLOAD success swr_backup_20260624_102431.zip
-2026-06-24 10:30:12 admin RESTORE_VALIDATE success source=swr-field-01 schema=3
-2026-06-24 10:31:02 admin RESTORE_APPLY success devices=24 registers=1284 restartRequired=true
-```
+| 이벤트 | 레벨 | 로그 메시지 예시 |
+|---|---|---|
+| 백업 다운로드 요청 | INFO | `Backup download requested by admin` |
+| 백업 생성 성공 | INFO | `Backup generated: swr_backup_20260624_102431.zip (3 devices, 48 registers)` |
+| 백업 생성 실패 | ERROR | `Backup generation failed: disk full` |
+| 복원 파일 업로드 | INFO | `Restore file uploaded: swr_backup_20260624_102431.zip` |
+| 복원 validate 성공 | INFO | `Restore validate OK: 3 devices, 48 registers (restoreId: tmp_restore_20260624_102431)` |
+| 복원 validate 실패 | WARN | `Restore validate failed: checksum mismatch (file: devices.json)` |
+| 복원 apply 시작 | INFO | `Restore apply started (restoreId: tmp_restore_20260624_102431)` |
+| 복원 성공 | INFO | `Restore completed: devices=3, registers=48` |
+| 복원 실패 | ERROR | `Restore failed: DB transaction error` |
+| rollback 수행 | WARN | `Restore rollback completed` |
+| 복원 후 재시작 요청 | INFO | `System restart requested after restore by admin` |
 
 ---
 
@@ -920,6 +902,8 @@ ZIP 보안 처리:
 - config.json
 - devices.json
 - registers.json
+- users.json (admin 제외)
+- hmi.json (빈 데이터)
 - checksum.sha256
 - ZIP 다운로드
 
@@ -936,35 +920,157 @@ ZIP 보안 처리:
 - 복원 후 restartRequired 반환
 ```
 
-초기 구현에서 제외:
+---
+
+## 30. 향후 개선 사항
+
+초기 버전 이후 검토할 개선 항목이다.
 
 ```text
-- 폴링 설정 복원
-- HMI 설정 복원
-- 사용자 계정 복원
-- 병합 복원
-- schema migration
-- rollback UI
+- 사용자 계정 복원 지원 (admin 제외 선택적 복원)
+- 복원 적용 시 폴링 자동 정지/재시작
+- 장비 ID 충돌 처리를 통한 병합 방식 복원
+- HMI 스케치 설정 백업/복원
+- 복원 이력 관리 API
 ```
 
 ---
 
-## 30. 향후 확장 항목
+## 32. 개발 TODO LIST
 
-추후 다음 기능을 확장할 수 있다.
+### 사전 작업
 
-- 병합 복원
-- schema migration
-- rollback UI
-- 백업 파일 암호화
-- 백업 파일 서명
-- 사용자 계정 선택 복원
-- 자동 정기 백업
-- 외부 USB 저장 백업
-- 백업 이력 관리
-- 부분 백업
-- 원격 SWR 간 직접 복제
-- 복원 전 차이점 비교 화면
+- [x] ZIP 라이브러리 선정 및 적용
+  - Qt6 private API (`QZipWriter` / `QZipReader`) 채택 — 외부 라이브러리 불필요
+  - sysroot 확인: `QtCore/6.8.3/QtCore/private/qzipwriter_p.h`, `qzipreader_p.h` 존재
+  - `CMakeLists.txt` `target_link_libraries`에 `Qt6::CorePrivate` 추가 완료
+  - `find_package`에는 추가하지 않음 (`Qt6::Core` 로드 시 자동 생성되는 타겟)
+- [x] `handleDeleteUser` — admin 계정 삭제 차단 추가
+  - `username == "admin"` (대소문자 무관) 이면 403 Forbidden 반환
+  - 사양서 5.2: admin id=0 고정, 삭제 불가 정책 반영
+
+---
+
+### 신규 파일 생성
+
+#### `maintenance/BackupModels.h`
+
+- [x] `BackupManifest` 구조체 (product, createdAt, sourceDevice, contents) — backupVersion 제거, schemaVersion=SR_SCHEMA_VERSION
+- [x] `RestoreOptions` 구조체 (config, network, devices, registers, users)
+- [x] `RestorePreview` 구조체 (backupInfo, items별 available/count, warnings 목록)
+- [x] `RestoreItemInfo` 구조체 (available, count, warning)
+
+#### `maintenance/BackupManager.h / .cpp`
+
+- [x] `create(DeviceDatabase*)` → ZIP 바이트배열 반환 (다운로드용)
+- [x] `buildManifest()` → manifest.json 생성 (SR_VERSION, SR_REVISION, SR_ZCODE, SR_SCHEMA_VERSION 포함)
+- [x] `buildConfig()` → config.json 생성 (system, serial, modbusServer, network 포함)
+- [x] `buildDevices(DeviceDatabase*)` → devices.json 생성
+- [x] `buildRegisters(DeviceDatabase*)` → registers.json 생성
+- [x] `buildUsers(DeviceDatabase*)` → users.json 생성 (admin id=0 제외, passwordHash 포함)
+- [x] `buildHmi()` → hmi.json 생성 (빈 객체)
+- [x] `buildChecksum(파일목록)` → checksum.sha256 생성 (SHA-256, QCryptographicHash 사용)
+- [x] ZIP은 QBuffer+QZipWriter로 메모리 내 생성 — 임시 파일 없음
+- [x] Logger 호출: 백업 생성 성공
+
+#### `maintenance/RestoreManager.h / .cpp`
+
+- [x] `validate(QByteArray zipData)` → RestorePreview 반환 및 restoreId 발급
+  - [x] ZIP 형식 검증 (QZipReader::status)
+  - [x] 임시 경로 저장 (`/tmp/swr_restore/{uuid}/`)
+  - [x] path traversal 방지 (파일명 내 `../`, `/` 검사)
+  - [x] 필수 파일 존재 확인 (manifest.json, checksum.sha256)
+  - [x] checksum.sha256 재계산 및 비교 → 불일치 시 차단
+  - [x] manifest.json 파싱 및 schemaVersion 호환성 검사
+  - [x] 복원 가능 항목 및 건수 집계 (devices, registers, users)
+  - [x] 경고 메시지 생성 (hostname 불일치, 네트워크 설정 주의)
+  - [x] Logger 호출: validate 성공/실패
+- [x] `apply(restoreId, RestoreOptions, DeviceDatabase*, PollingManager*)` → 복원 적용
+  - [x] restoreId 유효성 확인 (임시 디렉터리 존재 여부)
+  - [x] 폴링 동작 중이면 차단
+  - [x] `db->restoreData()` — 단일 트랜잭션으로 clear+insert
+  - [x] 선택된 config 항목 적용 (system, serial, modbusServer, loginSecurity, network)
+  - [x] 임시 파일 삭제
+  - [x] Logger 호출: apply 시작/성공/실패
+  - [x] `restartRequired = true` 반환
+- [x] `cleanupExpired()` — 30분 초과 임시 세션 삭제
+
+---
+
+### 기존 파일 수정
+
+#### `data_collection/database/DeviceDatabase.h / .cpp`
+
+- [x] `restoreData(restoreDevices, devices, registers, restoreUsers, users)` — 단일 트랜잭션
+  - [x] devices 전체 삭제 (CASCADE → registers 자동 삭제)
+  - [x] devices INSERT + old_id→new_id 매핑 빌드
+  - [x] registers INSERT (deviceId 재매핑)
+  - [x] users INSERT (기존 username 스킵, admin 제외)
+  - [x] rollback on failure
+
+#### `config/AppConfig.h / .cpp`
+
+- [x] 별도 exportToJson/importFromJson 미추가 — RestoreManager 내부에서 직접 JSON 파싱 후 `saveConfig()` 호출
+
+#### `api/ApiServer.h / .cpp`
+
+- [x] `handleGetBackup(request)` 구현 — admin 권한, ZIP 응답, Content-Disposition 헤더
+- [x] `handleRestoreValidate(request)` 구현 — admin 권한, raw ZIP body, RestorePreview JSON 반환
+- [x] `handleRestoreApply(request)` 구현 — admin 권한, restoreId+options JSON, 폴링 차단
+- [x] `setupRoutes()` — 3개 라우트 등록
+  ```
+  GET  /api/maintenance/backup
+  POST /api/maintenance/restore/validate
+  POST /api/maintenance/restore/apply
+  ```
+
+#### `CMakeLists.txt`
+
+- [x] `maintenance/BackupModels.h` 추가
+- [x] `maintenance/BackupManager.h maintenance/BackupManager.cpp` 추가
+- [x] `maintenance/RestoreManager.h maintenance/RestoreManager.cpp` 추가
+- [x] `Qt6::CorePrivate` — `target_link_libraries`에 추가 완료 (QZipWriter/QZipReader)
+
+---
+
+API 흐름:
+① POST /api/maintenance/restore/validate  ← raw ZIP body
+   → restoreId + RestorePreview 반환 (items 수량, warnings)
+
+② POST /api/maintenance/restore/apply
+   body: { "restoreId": "...", "options": { "config": true, "network": false, ... } }
+   → DB 복원 → config 복원 → { "ok": true, "restartRequired": true }
+
+
+
+### 로그 연동 확인
+
+- [ ] 백업 다운로드 요청 — `Logger::info`
+- [ ] 백업 생성 성공 — `Logger::info` (장비 수, 레지스터 수 포함)
+- [ ] 백업 생성 실패 — `Logger::error`
+- [ ] 복원 파일 업로드 — `Logger::info`
+- [ ] 복원 validate 성공 — `Logger::info`
+- [ ] 복원 validate 실패 — `Logger::warning`
+- [ ] 복원 apply 시작 — `Logger::info`
+- [ ] 복원 성공 — `Logger::info`
+- [ ] 복원 실패 — `Logger::error`
+- [ ] rollback 수행 — `Logger::warning`
+- [ ] 복원 후 재시작 요청 — `Logger::info`
+
+---
+
+### 테스트 항목
+
+- [ ] 같은 장비에서 백업 → 복원 정상 동작 확인
+- [ ] 다른 SWR 장비로 복원 (hostname 불일치 경고 포함)
+- [ ] 잘못된 형식 파일 업로드 시 차단 확인
+- [ ] checksum 불일치 파일 복원 차단 확인
+- [ ] schemaVersion 불일치 시 복원 차단 확인
+- [ ] 네트워크 설정 기본 OFF 확인
+- [ ] 폴링 중 복원 차단 확인
+- [ ] DB transaction 실패 시 rollback 확인 (현재 설정 유지)
+- [ ] admin 계정 삭제 차단 확인
+- [ ] path traversal 공격 방어 확인
 
 ---
 
@@ -972,15 +1078,16 @@ ZIP 보안 처리:
 
 ```text
 백업 파일은 ZIP 패키지로 생성한다.
-백업 파일에는 manifest, config, devices, registers, checksum을 포함한다.
-현재 개발 범위에서 polling 설정과 HMI 설정은 제외한다.
+백업 파일에는 manifest, config, devices, registers, users, hmi, checksum을 포함한다.
+현재 개발 범위에서 HMI 데이터는 빈 데이터로 포함한다.
 네트워크 설정은 기본 복원 대상에서 제외하고 사용자가 명시적으로 선택해야 한다.
-사용자 계정은 초기 버전에서 복원하지 않는다.
+admin 계정은 백업/복원하지 않으며 id=0으로 항상 고정한다.
 복원 전 validate API로 파일과 호환성을 검증한다.
-복원 적용 전 현재 설정을 자동 백업한다.
-복원은 초기 버전에서 전체 교체 방식으로 수행한다.
 복원 중 폴링이 동작 중이면 적용을 차단한다.
 DB 변경은 transaction으로 처리하고 실패 시 rollback한다.
 복원 완료 후 restartRequired를 반환하고 웹에서 재시작 필요 알림을 표시한다.
 백업/복원 API는 관리자 권한에서만 허용한다.
+모든 백업/복원 작업은 Logger에 기록한다.
 ```
+
+

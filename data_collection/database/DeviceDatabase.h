@@ -2,6 +2,7 @@
 
 #include "../model/DeviceModels.h"
 
+#include <QJsonArray>
 #include <QList>
 #include <QString>
 
@@ -60,8 +61,16 @@ public:
                                                       QString &error) const;
     bool deleteLoginHistory(const QString &username, QString &error);
 
-    // Poll Log
-    QList<Model::PollLogEntry> fetchPollLog(int deviceId, int limit, QString &error) const;
+    // Restore
+    bool restoreData(bool restoreDevices,
+                     const QJsonArray &devices,
+                     const QJsonArray &registers,
+                     bool restoreUsers,
+                     const QJsonArray &users,
+                     QString &error);
+
+    // Factory Reset
+    bool factoryReset(QString &error);
 
     // Insert Sample Data
     bool insertRefrigerationSampleDevices(QString &error);

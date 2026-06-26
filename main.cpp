@@ -1,7 +1,6 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QXmlStreamReader>
-#include <QCryptographicHash>
 
 #include "config/AppConfig.h"
 #include "config/SystemConfig.h"
@@ -22,7 +21,7 @@ namespace DCDB    = DataCollection::Database;
 namespace DCPoll  = DataCollection::Polling;
 
 int main(int argc, char *argv[])
-{
+{    
     QCoreApplication app(argc, argv);
 
     //-----------------------------------------------------------------//
@@ -135,28 +134,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Add default admin account.
-    DCModel::UserInfo admin;
-    admin.username     = QStringLiteral("admin");
-    admin.displayName  = QStringLiteral("Administrator");
-    admin.description  = QStringLiteral("Default administrator account");
-    admin.passwordHash = QString::fromLatin1(
-        QCryptographicHash::hash(
-            QByteArrayLiteral("1234"),
-            QCryptographicHash::Sha256
-            ).toHex()
-        );
-    admin.role   = DCModel::userRoleFromString(QStringLiteral("admin"));
-    admin.status = DCModel::UserStatus::Active;
-
-    if (!db.insertUser(admin, dbError)) {
-        Util::Logger::error(QStringLiteral("Failed to create default admin user: %1").arg(dbError));
-        return 1;
-    }
-
-    Util::Logger::info(QStringLiteral("All Database Table Resetted."));
-    Util::Logger::info(QStringLiteral("Default admin user created. username=admin"));
-
+    Util::Logger::info(QStringLiteral("Database schema reset completed. Default admin account ensured."));
     return 0;
 #endif
 
@@ -185,7 +163,7 @@ int main(int argc, char *argv[])
     //-----------------------------------------------------------------//
     // Start Polling Manager
     //-----------------------------------------------------------------//
-    DCPoll::PollingManager pollingManager(dbFilePath, registerTable, deviceList);
+    DCPoll::PollingManager pollingManager(registerTable, deviceList);
 
     QString pollError;
     if(!pollingManager.start(pollError)){
@@ -206,5 +184,7 @@ int main(int argc, char *argv[])
         Util::Logger::error(QStringLiteral("Failed to start API server: %1").arg(apiError));
     }
 
-    return app.exec();
+    const int result = app.exec();
+    Util::Logger::shutdown();
+    return result;
 }

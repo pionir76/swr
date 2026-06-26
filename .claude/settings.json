@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=yes root@192.168.0.150 'echo connected')",
+      "Bash(ssh -i /home/dev3/.ssh/qtc_id -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.0.150 'echo connected')"
+    ]
+  }
+}

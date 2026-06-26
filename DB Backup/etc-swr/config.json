@@ -1,0 +1,48 @@
+{
+    "login_security": {
+        "autoLogout": true,
+        "maxFailedAttempts": 3,
+        "minPasswordLength": 6,
+        "sessionTimeoutMinutes": 10
+    },
+    "modbus_server": {
+        "enabled": false,
+        "port": 502,
+        "slaveId": 1
+    },
+    "network": {
+        "interfaces": [
+            {
+                "dns": "8.8.8.8",
+                "enabled": true,
+                "gateway": "192.168.0.1",
+                "ipAddress": "192.168.0.150",
+                "mode": "static",
+                "name": "eth0",
+                "netmask": "255.255.255.0",
+                "role": "field"
+            },
+            {
+                "dns": "",
+                "enabled": true,
+                "gateway": "",
+                "ipAddress": "192.168.0.151",
+                "mode": "static",
+                "name": "eth1",
+                "netmask": "255.255.255.0",
+                "role": "service"
+            }
+        ]
+    },
+    "serial": {
+        "baudRate": 9600,
+        "dataBits": 8,
+        "device": "/dev/ttymxc1",
+        "parity": "none",
+        "stopBits": 1
+    },
+    "system": {
+        "hostname": "smartroute",
+        "ntpServer": "pool.ntp.org"
+    }
+}

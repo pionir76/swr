@@ -4,11 +4,9 @@
 namespace DataCollection {
 namespace Polling {
 
-PollingManager::PollingManager(const QString &dbPath,
-                               std::shared_ptr<Store::RegisterTable> table,
+PollingManager::PollingManager(std::shared_ptr<Store::RegisterTable> table,
                                std::shared_ptr<Store::DeviceList> deviceList)
-    : m_dbPath(dbPath)
-    , m_table(std::move(table))
+    : m_table(std::move(table))
     , m_deviceList(std::move(deviceList))
 {
 }
@@ -20,55 +18,38 @@ PollingManager::~PollingManager()
 
 bool PollingManager::start(QString& error)
 {
-    if(m_running) {
+    if (m_running) {
         error = QStringLiteral("Polling is already running.");
         return false;
     }
 
     m_table->clear();
 
-    m_logQueue  = std::make_unique<PollLogQueue>();
-    m_logWriter = std::make_unique<LogWriterThread>(m_dbPath, m_logQueue.get());
-    m_logWriter->start();
-
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
     QList<Model::DeviceInfo> serialDevices;
     QList<Model::DeviceInfo> tcpDevices;
 
-    for(const Model::DeviceInfo &d : devices){
-        if(d.connection.type == Model::DeviceConnection::ConnectionType::Serial){
+    for (const Model::DeviceInfo &d : devices) {
+        if (d.connection.type == Model::DeviceConnection::ConnectionType::Serial)
             serialDevices.append(d);
-        }
-        else{
+        else
             tcpDevices.append(d);
-        }
     }
 
     if (!serialDevices.isEmpty()) {
-        m_serialWorker = std::make_unique<SerialWorker>(
-            serialDevices, 
-            m_table, 
-            m_deviceList, 
-            m_logQueue.get());
-
+        m_serialWorker = std::make_unique<SerialWorker>(serialDevices, m_table, m_deviceList);
         m_serialWorker->start();
-        
         Util::Logger::info(QStringLiteral("SerialWorker started: %1 device(s)").arg(serialDevices.size()));
     }
 
     for (const Model::DeviceInfo &d : tcpDevices) {
-        auto *worker = new TcpWorker(
-            d, m_table, 
-            m_deviceList, 
-            m_logQueue.get());
-
+        auto *worker = new TcpWorker(d, m_table, m_deviceList);
         m_tcpWorkers.append(worker);
         worker->start();
     }
-    if (!tcpDevices.isEmpty()) {
+    if (!tcpDevices.isEmpty())
         Util::Logger::info(QStringLiteral("TcpWorker started: %1 device(s)").arg(tcpDevices.size()));
-    }
 
     m_running = true;
     Util::Logger::info(QStringLiteral("Polling started. Total devices: %1").arg(devices.size()));
@@ -84,19 +65,11 @@ void PollingManager::stop()
         m_serialWorker.reset();
     }
 
-    // Stop and delete all TcpWorker instances
     for (TcpWorker *w : m_tcpWorkers) {
         w->stop();
         delete w;
     }
     m_tcpWorkers.clear();
-
-    // 워커 종료 후 로그 라이터 중단 (잔여 큐 플러시 보장)
-    if (m_logWriter) {
-        m_logWriter->stop();
-        m_logWriter.reset();
-    }
-    m_logQueue.reset();
 
     m_running = false;
     Util::Logger::info(QStringLiteral("Polling stopped."));
@@ -106,7 +79,6 @@ bool PollingManager::isRunning() const
 {
     return m_running;
 }
-
 
 } // namespace Polling
 } // namespace DataCollection

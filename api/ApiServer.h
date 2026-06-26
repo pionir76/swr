@@ -7,6 +7,7 @@ namespace DataCollection::Database { class DeviceDatabase; }
 namespace DataCollection::Store   { class RegisterTable; class DeviceList; }
 namespace DataCollection::Polling { class PollingManager; }
 namespace DataCollection::Model   { struct DeviceInfo; struct RegisterField; }
+namespace Util { class SystemMonitor; }
 
 namespace Api{
 
@@ -93,8 +94,14 @@ private:
     QHttpServerResponse handleGetLoginHistory(const QHttpServerRequest &request);
     QHttpServerResponse handleDeleteLoginHistory(const QHttpServerRequest &request);
 
-    // Poll Log
-    QHttpServerResponse handleGetDevicePollLog(const QHttpServerRequest &request);
+    // Maintenance
+    QHttpServerResponse handleGetBackup(const QHttpServerRequest &request);
+    QHttpServerResponse handleRestoreValidate(const QHttpServerRequest &request);
+    QHttpServerResponse handleRestoreApply(const QHttpServerRequest &request);
+    QHttpServerResponse handlePostFactoryReset(const QHttpServerRequest &request);
+
+    // System Resources
+    QHttpServerResponse handleGetSystemResources(const QHttpServerRequest &request);
 
     // Security Policy
     QHttpServerResponse handleGetSecurityPolicy(const QHttpServerRequest &request);
@@ -113,6 +120,7 @@ private:
     std::shared_ptr<DataCollection::Store::RegisterTable> m_registerTable;
     std::shared_ptr<DataCollection::Store::DeviceList> m_deviceList;
     DataCollection::Polling::PollingManager *m_pollingManager;
+    Util::SystemMonitor *m_systemMonitor;
     QHttpServer m_server;
 
     mutable QMutex m_sessionMutex;

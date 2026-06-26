@@ -1,11 +1,15 @@
 #include "ApiServer.h"
 
 #include "../config/AppConfig.h"
+#include "../config/SystemConfig.h"
 #include "../data_collection/database/DeviceDatabase.h"
+#include "../maintenance/BackupManager.h"
+#include "../maintenance/RestoreManager.h"
 #include "../data_collection/store/RegisterTable.h"
 #include "../data_collection/store/DeviceList.h"
 #include "../data_collection/polling/PollingManager.h"
 #include "../utils/Logger.h"
+#include "../utils/SystemMonitor.h"
 
 #include <QCoreApplication>
 #include <QHttpServerRequest>
@@ -36,6 +40,10 @@ ApiServer::ApiServer(Database::DeviceDatabase *db,
     , m_registerTable(std::move(registerTable))
     , m_deviceList(std::move(deviceList))
     , m_pollingManager(pollingManager)
+    , m_systemMonitor(new Util::SystemMonitor(
+          {QStringLiteral("/"), QStringLiteral("/var")},
+          {QStringLiteral("eth0"), QStringLiteral("eth1")},
+          3, this))
 {
 }
 
@@ -102,8 +110,6 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetDevices(req); });
     m_server.route("/api/devices/status", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetDeviceStatus(req); });
-    m_server.route("/api/devices/poll-log", QHttpServerRequest::Method::Get,
-                   [this](const QHttpServerRequest &req) { return handleGetDevicePollLog(req); });
     m_server.route("/api/devices", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostDevice(req); });
     m_server.route("/api/devices/<arg>", QHttpServerRequest::Method::Put,
@@ -176,6 +182,17 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePostRestart(req); });
     m_server.route("/api/system/info", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetSystemInfo(req); });
+
+    m_server.route("/api/maintenance/backup", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetBackup(req); });
+    m_server.route("/api/maintenance/restore/validate", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handleRestoreValidate(req); });
+    m_server.route("/api/maintenance/restore/apply", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handleRestoreApply(req); });
+    m_server.route("/api/maintenance/factory-reset", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostFactoryReset(req); });
+    m_server.route("/api/system/resources", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetSystemResources(req); });
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +343,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     if (!isAuthenticated(request))
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
 
-    static constexpr int kDashPollLogLimit  = 20;
+    static constexpr int kDashAlertLimit    = 20;
     static constexpr int kDashLogLimit      = 20;
     static constexpr int kDashRealtimeLimit = 20;
 
@@ -368,27 +385,25 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         devArr.append(obj);
     }
 
-    // ── 2. Poll log (all devices, newest first) ─────────────────────────────
-    QString pollLogError;
-    const QList<Model::PollLogEntry> pollLogEntries =
-        m_db->fetchPollLog(-1, kDashPollLogLimit, pollLogError);
+    // ── 2. Alerts — WARN + ERROR logs, newest first ─────────────────────────
+    QString alertErr;
+    QList<Util::LogEntry> alertEntries =
+        Util::Logger::fetch(kDashAlertLimit, 0, QStringLiteral("WARN"),  {}, {}, alertErr);
+    alertEntries +=
+        Util::Logger::fetch(kDashAlertLimit, 0, QStringLiteral("ERROR"), {}, {}, alertErr);
+    std::sort(alertEntries.begin(), alertEntries.end(),
+              [](const Util::LogEntry &a, const Util::LogEntry &b) { return a.id > b.id; });
+    if (alertEntries.size() > kDashAlertLimit)
+        alertEntries.resize(kDashAlertLimit);
 
-    int recentFailCount = 0;
-    QJsonArray pollLogArr;
-    for (const Model::PollLogEntry &e : pollLogEntries) {
-        if (!e.success)
-            ++recentFailCount;
-
+    QJsonArray alertArr;
+    for (const Util::LogEntry &e : alertEntries) {
         QJsonObject obj;
-        obj["id"]            = e.id;
-        obj["deviceId"]      = e.deviceId;
-        obj["deviceName"]    = e.deviceName;
-        obj["timestamp"]     = e.timestamp;
-        obj["success"]       = e.success;
-        obj["durationMs"]    = e.durationMs;
-        obj["registerCount"] = e.registerCount;
-        obj["message"]       = e.message;
-        pollLogArr.append(obj);
+        obj["id"]        = e.id;
+        obj["timestamp"] = e.timestamp.toString(Qt::ISODate);
+        obj["level"]     = Util::logLevelToString(e.level);
+        obj["message"]   = e.message;
+        alertArr.append(obj);
     }
 
     // ── 3. Realtime registers (top N, newest by lastUpdated) ────────────────
@@ -432,10 +447,10 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         ++realtimeCount;
     }
 
-    // ── 4. System logs (newest first) ───────────────────────────────────────
-    QString logError;
+    // ── 4. System logs — INFO only, newest first ────────────────────────────
+    QString logErr;
     const QList<Util::LogEntry> logEntries =
-        Util::Logger::fetch(kDashLogLimit, {}, {}, {}, logError);
+        Util::Logger::fetch(kDashLogLimit, 0, QStringLiteral("INFO"), {}, {}, logErr);
 
     QJsonArray logArr;
     for (const Util::LogEntry &e : logEntries) {
@@ -449,11 +464,10 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
 
     // ── 5. Compose response ─────────────────────────────────────────────────
     QJsonObject kpi;
-    kpi["totalDevices"]    = devices.size();
-    kpi["okDevices"]       = okCount;
-    kpi["errorDevices"]    = errorCount;
-    kpi["unknownDevices"]  = unknownCount;
-    kpi["recentFailCount"] = recentFailCount;
+    kpi["totalDevices"]   = devices.size();
+    kpi["okDevices"]      = okCount;
+    kpi["errorDevices"]   = errorCount;
+    kpi["unknownDevices"] = unknownCount;
 
     QJsonObject polling;
     polling["running"] = m_pollingManager->isRunning();
@@ -463,7 +477,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     resp["kpi"]               = kpi;
     resp["devices"]           = devArr;
     resp["realtimeRegisters"] = realtimeArr;
-    resp["pollLog"]           = pollLogArr;
+    resp["alerts"]            = alertArr;
     resp["logs"]              = logArr;
 
     return QHttpServerResponse(resp);
@@ -746,6 +760,7 @@ QHttpServerResponse ApiServer::handleDeleteDevice(const QHttpServerRequest &requ
         return QHttpServerResponse(QHttpServerResponse::StatusCode::InternalServerError);
     }
 
+    Util::Logger::info(QStringLiteral("Device deleted: id=%1").arg(id));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
@@ -1120,6 +1135,12 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
 // ---------------------------------------------------------------------------
 // Log Handler
 // ---------------------------------------------------------------------------
+// GET /api/logs?limit=20&offset=0  → 1페이지 (0~19)
+// GET /api/logs?limit=20&offset=20 → 2페이지 (20~39)
+// GET /api/logs?level=WARN         → 레벨 필터
+// GET /api/logs?from=2026-06-01&to=2026-06-30 → 기간 필터
+// 파라미터 없으면 → "level": "ALL", "limit": 1000, "offset": 0
+
 QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
 {
     if (!isAuthenticated(request))
@@ -1131,9 +1152,16 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
     if (query.hasQueryItem(QStringLiteral("limit"))) {
         bool ok = false;
         const int requested = query.queryItemValue(QStringLiteral("limit")).toInt(&ok);
-        if (ok && requested > 0) {
+        if (ok && requested > 0)
             limit = requested;
-        }
+    }
+
+    int offset = 0;
+    if (query.hasQueryItem(QStringLiteral("offset"))) {
+        bool ok = false;
+        const int requested = query.queryItemValue(QStringLiteral("offset")).toInt(&ok);
+        if (ok && requested >= 0)
+            offset = requested;
     }
 
     const QString level = query.queryItemValue(QStringLiteral("level")).toUpper();
@@ -1141,13 +1169,17 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
     const QString to    = query.queryItemValue(QStringLiteral("to"));
 
     QString error;
-    const QList<Util::LogEntry> entries = Util::Logger::fetch(limit, level, from, to, error);
+    const QList<Util::LogEntry> entries =
+        Util::Logger::fetch(limit, offset, level, from, to, error);
 
     if (!error.isEmpty()) {
         QJsonObject body;
         body["error"] = error;
         return QHttpServerResponse(body, QHttpServerResponse::StatusCode::InternalServerError);
     }
+
+    QString countErr;
+    const qint64 total = Util::Logger::count(level, from, to, countErr);
 
     QJsonArray arr;
     for (const Util::LogEntry &entry : entries) {
@@ -1160,9 +1192,15 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
     }
 
     QJsonObject resp;
-    resp["logs"]  = arr;
-    resp["count"] = arr.size();
-    
+    resp["logs"]   = arr;
+    resp["count"]  = arr.size();
+    resp["total"]  = total;
+    resp["limit"]  = limit;
+    resp["offset"] = offset;
+    resp["level"]  = level.isEmpty() ? QStringLiteral("ALL") : level;
+    resp["from"]   = from;
+    resp["to"]     = to;
+
     return QHttpServerResponse(resp);
 }
 
@@ -1270,6 +1308,28 @@ QHttpServerResponse ApiServer::handleDeleteUser(const QHttpServerRequest &reques
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
 
     QString error;
+    bool found = false;
+    const Model::UserInfo user = m_db->loadUser(username, found, error);
+    if (!error.isEmpty()) {
+        QJsonObject err;
+        err["error"] = error;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+    if (!found) {
+        QJsonObject err;
+        err["error"] = QStringLiteral("User not found: %1").arg(username);
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    //-------------------------------------------------------------------------------//
+    // Prevent deletion of the admin account ID 0, which is the default superuser.
+    //-------------------------------------------------------------------------------//
+    if (user.id == 0) {
+        QJsonObject err;
+        err["error"] = QStringLiteral("admin 계정은 삭제할 수 없습니다.");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
     if (!m_db->deleteUser(username, error)) {
         Util::Logger::error(QStringLiteral("deleteUser failed: %1").arg(error));
         return QHttpServerResponse(QHttpServerResponse::StatusCode::InternalServerError);
@@ -1341,6 +1401,11 @@ QHttpServerResponse ApiServer::handlePutUser(const QHttpServerRequest &request,
         user.description = body.value(QLatin1String("description")).toString();
 
     if (body.contains(QLatin1String("role"))) {
+        if (user.id == 0) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("admin 계정의 role은 변경할 수 없습니다.");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+        }
         const QString roleStr = body.value(QLatin1String("role")).toString().toLower().trimmed();
         if (roleStr != QLatin1String("user") &&
             roleStr != QLatin1String("manager") &&
@@ -1468,18 +1533,6 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
     if (!doc.isObject())
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
-        qDebug() << "handlePutUserStatus: request body:" << doc.toJson(QJsonDocument::Compact);
-        
-    const QString statusStr = doc.object()
-                                  .value(QLatin1String("status")).toString().toLower().trimmed();
-    if (statusStr != QLatin1String("active") &&
-        statusStr != QLatin1String("locked") &&
-        statusStr != QLatin1String("disabled")) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("status must be: active | locked | disabled");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
-    }
-
     QString dbError;
     bool found = false;
     Model::UserInfo user = m_db->loadUser(username, found, dbError);
@@ -1492,6 +1545,22 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("User not found: %1").arg(username);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    if (user.id == 0) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("admin 계정의 status는 변경할 수 없습니다.");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    const QString statusStr = doc.object()
+                                  .value(QLatin1String("status")).toString().toLower().trimmed();
+    if (statusStr != QLatin1String("active") &&
+        statusStr != QLatin1String("locked") &&
+        statusStr != QLatin1String("disabled")) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("status must be: active | locked | disabled");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
     const Model::UserStatus newStatus = Model::userStatusFromString(statusStr);
@@ -1527,49 +1596,6 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
     return QHttpServerResponse(resp);
 }
 
-
-// ---------------------------------------------------------------------------
-// Poll Log Handler
-// ---------------------------------------------------------------------------
-QHttpServerResponse ApiServer::handleGetDevicePollLog(const QHttpServerRequest &request)
-{
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-
-    const QUrlQuery query(request.url());
-    const int deviceId = query.hasQueryItem(QStringLiteral("deviceId"))
-                         ? query.queryItemValue(QStringLiteral("deviceId")).toInt()
-                         : -1;
-    const int limit    = query.hasQueryItem(QStringLiteral("limit"))
-                         ? query.queryItemValue(QStringLiteral("limit")).toInt()
-                         : Model::kPollLogMaxEntries;
-
-    QString error;
-
-    // Fetch poll log entries from the database
-    const QList<DataCollection::Model::PollLogEntry> entries = m_db->fetchPollLog(deviceId, limit, error);
-
-    if (!error.isEmpty()) {
-        QJsonObject err;
-        err[QLatin1String("error")] = error;
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
-    }
-
-    QJsonArray arr;
-    for (const auto &e : entries) {
-        QJsonObject obj;
-        obj[QLatin1String("id")]            = e.id;
-        obj[QLatin1String("deviceId")]      = e.deviceId;
-        obj[QLatin1String("deviceName")]    = e.deviceName;
-        obj[QLatin1String("timestamp")]     = e.timestamp;
-        obj[QLatin1String("success")]       = e.success;
-        obj[QLatin1String("durationMs")]    = e.durationMs;
-        obj[QLatin1String("registerCount")] = e.registerCount;
-        obj[QLatin1String("message")]       = e.message;
-        arr.append(obj);
-    }
-    return QHttpServerResponse(arr);
-}
 
 QHttpServerResponse ApiServer::handleGetLoginHistory(const QHttpServerRequest &request)
 {
@@ -2017,9 +2043,10 @@ QHttpServerResponse ApiServer::handleGetSystemInfo(const QHttpServerRequest &req
     const double usedPct   = total > 0 ? (static_cast<double>(used) / total * 100.0) : 0.0;
 
     QJsonObject info;
-    info[QLatin1String("ver")] = SR_VERSION;
-    info[QLatin1String("rev")] = SR_REVISION;
-    info[QLatin1String("zcode")] = SR_ZCODE;
+    info[QLatin1String("ver")]            = SR_VERSION;
+    info[QLatin1String("rev")]            = SR_REVISION;
+    info[QLatin1String("zcode")]          = SR_ZCODE;
+    info[QLatin1String("schemaVersion")]  = SR_SCHEMA_VERSION;
     info[QLatin1String("lastUpdateDate")] = SR_LAST_UPDATE_DATE;
 
     QJsonObject disk;
@@ -2028,10 +2055,29 @@ QHttpServerResponse ApiServer::handleGetSystemInfo(const QHttpServerRequest &req
     disk[QLatin1String("available")]   = available;
     disk[QLatin1String("usedPercent")] = qRound(usedPct * 10.0) / 10.0;
 
-    QJsonObject resp;
+    // summary
+    const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
+    int registerCount = 0;
+    for (const Model::DeviceInfo &d : devices)
+        registerCount += d.registers.size();
 
-    resp[QLatin1String("disk")] = disk;
-    resp[QLatin1String("info")] = info;
+    QString usrErr;
+    const QList<Model::UserInfo> users = m_db->loadUsers(usrErr);
+
+    QString logErr;
+    const qint64 logTotal = Util::Logger::count({}, {}, {}, logErr);
+
+    QJsonObject summary;
+    summary[QLatin1String("deviceCount")]   = devices.size();
+    summary[QLatin1String("registerCount")] = registerCount;
+    summary[QLatin1String("userCount")]     = static_cast<int>(users.size());
+    summary[QLatin1String("logCount")]      = logTotal;
+    summary[QLatin1String("pollingActive")] = m_pollingManager->isRunning();
+
+    QJsonObject resp;
+    resp[QLatin1String("info")]    = info;
+    resp[QLatin1String("disk")]    = disk;
+    resp[QLatin1String("summary")] = summary;
 
     return QHttpServerResponse(resp);
 }
@@ -2128,5 +2174,315 @@ bool ApiServer::syncDeleteRegister(int deviceId, int address, const QString &typ
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+QHttpServerResponse ApiServer::handleGetBackup(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QString caller = sessionUsername(request);
+    QString dbError;
+    bool found = false;
+    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
+
+    //--------------------------------------------------------//
+    // Only Admin role can create backup
+    //--------------------------------------------------------//
+    if (!found || callerInfo.role != Model::UserRole::Admin) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    QString backupError;
+    QByteArray zipData = Maintenance::BackupManager::create(m_db, backupError);
+
+    if (zipData.isEmpty()) {
+        Util::Logger::error(QStringLiteral("Backup creation failed: %1").arg(backupError));
+
+        QJsonObject err;
+        err[QLatin1String("error")] = backupError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    const QString filename = QStringLiteral("swr_backup_%1.zip")
+                        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+
+    Util::Logger::info(QStringLiteral("Backup created by %1: %2 bytes").arg(caller).arg(zipData.size()));
+
+    QHttpServerResponse resp(QByteArrayLiteral("application/zip"), std::move(zipData));
+    QHttpHeaders hdrs = resp.headers();
+
+    hdrs.append(QHttpHeaders::WellKnownHeader::ContentDisposition,
+                QStringLiteral("attachment; filename=\"%1\"").arg(filename));
+    resp.setHeaders(std::move(hdrs));
+    return resp;
+}
+
+QHttpServerResponse ApiServer::handleRestoreValidate(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QString caller = sessionUsername(request);
+    QString dbError;
+    bool found = false;
+    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
+    if (!found || callerInfo.role != Model::UserRole::Admin) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    const QByteArray zipData = request.body();
+    if (zipData.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Empty body");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    Util::Logger::info(
+        QStringLiteral("Restore validate requested by %1: %2 bytes")
+        .arg(caller).arg(zipData.size()));
+
+    QString validateError;
+    const Maintenance::RestorePreview preview =
+        Maintenance::RestoreManager::validate(zipData, validateError);
+
+    if (!preview.valid) {
+        QJsonObject err;
+        err[QLatin1String("error")] = validateError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::UnprocessableEntity);
+    }
+
+    auto itemToJson = [](const Maintenance::RestoreItemInfo &item) {
+        QJsonObject obj;
+        obj[QLatin1String("available")] = item.available;
+        obj[QLatin1String("count")]     = item.count;
+        obj[QLatin1String("warning")]   = item.warning;
+        return obj;
+    };
+
+    QJsonObject backupInfo;
+    backupInfo[QLatin1String("product")]       = preview.backupInfo.product;
+    backupInfo[QLatin1String("createdAt")]     = preview.backupInfo.createdAt;
+    backupInfo[QLatin1String("hostname")]      = preview.backupInfo.hostname;
+    backupInfo[QLatin1String("version")]       = preview.backupInfo.version;
+    backupInfo[QLatin1String("revision")]      = preview.backupInfo.revision;
+    backupInfo[QLatin1String("zcode")]         = preview.backupInfo.zcode;
+    backupInfo[QLatin1String("schemaVersion")] = preview.backupInfo.schemaVersion;
+
+    QJsonArray warnings;
+    for (const QString &w : preview.warnings)
+        warnings.append(w);
+
+    QJsonObject resp;
+    resp[QLatin1String("restoreId")]  = preview.restoreId;
+    resp[QLatin1String("backupInfo")] = backupInfo;
+    resp[QLatin1String("config")]     = itemToJson(preview.config);
+    resp[QLatin1String("devices")]    = itemToJson(preview.devices);
+    resp[QLatin1String("registers")]  = itemToJson(preview.registers);
+    resp[QLatin1String("users")]      = itemToJson(preview.users);
+    resp[QLatin1String("hmi")]        = itemToJson(preview.hmi);
+    resp[QLatin1String("warnings")]   = warnings;
+
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handleRestoreApply(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QString caller = sessionUsername(request);
+    QString dbError;
+    bool found = false;
+    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
+    if (!found || callerInfo.role != Model::UserRole::Admin) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    QHttpServerResponse pollingCheck(QHttpServerResponse::StatusCode::Ok);
+    if (rejectIfPolling(pollingCheck))
+        return pollingCheck;
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Invalid JSON body");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+    const QJsonObject body = doc.object();
+
+    const QString restoreId = body[QLatin1String("restoreId")].toString();
+    if (restoreId.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("restoreId required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QJsonObject optJson = body[QLatin1String("options")].toObject();
+    Maintenance::RestoreOptions options;
+    options.config    = optJson[QLatin1String("config")].toBool(true);
+    options.network   = optJson[QLatin1String("network")].toBool(false);
+    options.devices   = optJson[QLatin1String("devices")].toBool(true);
+    options.registers = optJson[QLatin1String("registers")].toBool(true);
+    options.users     = optJson[QLatin1String("users")].toBool(true);
+    options.hmi       = optJson[QLatin1String("hmi")].toBool(false);
+
+    bool restartRequired = false;
+    QString applyError;
+    const bool ok = Maintenance::RestoreManager::apply(
+        restoreId, options, m_db, m_pollingManager, restartRequired, applyError);
+
+    if (!ok) {
+        QJsonObject err;
+        err[QLatin1String("error")] = applyError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    Util::Logger::info(
+        QStringLiteral("Restore applied by %1").arg(caller));
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]              = true;
+    resp[QLatin1String("restartRequired")] = restartRequired;
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handlePostFactoryReset(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const QString caller = sessionUsername(request);
+
+    QString dbErr;
+    bool found = false;
+    
+    //-----------------------------------------------------------------------//
+    // Check if the caller has Admin role
+    //-----------------------------------------------------------------------//
+    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbErr);
+    if (!found || callerInfo.role != Model::UserRole::Admin) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    //-----------------------------------------------------------------------//
+    // Polling must be stopped before factory reset
+    //-----------------------------------------------------------------------//
+    if (m_pollingManager->isRunning()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Stop polling before factory reset");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
+    }
+
+    Util::Logger::info(QStringLiteral("Factory reset requested by %1").arg(caller));
+
+    //-----------------------------------------------------------------------//
+    // 1. Initialize DB
+    //-----------------------------------------------------------------------//
+    QString resetErr;
+    if (!m_db->factoryReset(resetErr)) {
+        Util::Logger::error(QStringLiteral("Factory reset DB failed: %1").arg(resetErr));
+        QJsonObject err;
+        err[QLatin1String("error")] = resetErr;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    //-----------------------------------------------------------------------//
+    // 2. Initialize Config
+    //-----------------------------------------------------------------------//
+    QString cfgErr;
+    if (!factoryReset(QStringLiteral(SR_CONFIG_FILE), cfgErr)) {
+        Util::Logger::error(QStringLiteral("Factory reset config failed: %1").arg(cfgErr));
+        QJsonObject err;
+        err[QLatin1String("error")] = cfgErr;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    //-----------------------------------------------------------------------//
+    // 3. Initialize Logs
+    //-----------------------------------------------------------------------//
+    QString logErr;
+    Util::Logger::clearAll(logErr);
+
+    Util::Logger::info(QStringLiteral("Factory reset completed"));
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]              = true;
+    resp[QLatin1String("restartRequired")] = true;
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handleGetSystemResources(const QHttpServerRequest &request)
+{
+    if (!isAuthenticated(request))
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const Util::SystemResources res = m_systemMonitor->resources();
+
+    qDebug() << "System Resources:"
+             << "CPU" << res.cpuUsagePercent << "%"
+             << "LoadAvg" << res.loadAvg1 << res.loadAvg5 << res.loadAvg15
+             << "Temp" << res.cpuTempCelsius << "°C"
+             << "Memory" << res.memUsedKb << "/" << res.memTotalKb
+             << "Swap" << res.swapUsedKb << "/" << res.swapTotalKb
+             << "Disks" << res.disks.size()
+             << "Network" << res.network.size()
+             << "Uptime" << res.uptimeSeconds;
+             
+    QJsonObject cpu;
+    cpu[QLatin1String("usagePercent")] = res.cpuUsagePercent;
+    cpu[QLatin1String("loadAvg1")]     = res.loadAvg1;
+    cpu[QLatin1String("loadAvg5")]     = res.loadAvg5;
+    cpu[QLatin1String("loadAvg15")]    = res.loadAvg15;
+    cpu[QLatin1String("tempCelsius")]  = res.cpuTempCelsius;
+
+    QJsonObject memory;
+    memory[QLatin1String("totalKb")]      = res.memTotalKb;
+    memory[QLatin1String("usedKb")]       = res.memUsedKb;
+    memory[QLatin1String("usagePercent")] = res.memUsagePercent;
+
+    QJsonObject swap;
+    swap[QLatin1String("totalKb")]      = res.swapTotalKb;
+    swap[QLatin1String("usedKb")]       = res.swapUsedKb;
+    swap[QLatin1String("usagePercent")] = res.swapUsagePercent;
+
+    QJsonArray disks;
+    for (const Util::DiskStat &d : res.disks) {
+        QJsonObject obj;
+        obj[QLatin1String("mount")]        = d.mount;
+        obj[QLatin1String("totalMb")]      = d.totalMb;
+        obj[QLatin1String("usedMb")]       = d.usedMb;
+        obj[QLatin1String("usagePercent")] = d.usagePercent;
+        disks.append(obj);
+    }
+
+    QJsonObject network;
+    for (const Util::NetStat &n : res.network) {
+        QJsonObject obj;
+        obj[QLatin1String("rxBytes")] = n.rxBytes;
+        obj[QLatin1String("txBytes")] = n.txBytes;
+        network[n.iface] = obj;
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("cpu")]           = cpu;
+    resp[QLatin1String("memory")]        = memory;
+    resp[QLatin1String("swap")]          = swap;
+    resp[QLatin1String("disk")]          = disks;
+    resp[QLatin1String("network")]       = network;
+    resp[QLatin1String("uptimeSeconds")] = res.uptimeSeconds;
+    resp[QLatin1String("cachedAt")]      = res.cachedAt.toString(Qt::ISODate);
+    return QHttpServerResponse(resp);
+}
 
 } // namespace Api
