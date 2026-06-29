@@ -11,7 +11,8 @@ namespace DataCollection {
 namespace Comm {
 
 // Samwontech PCLink+SUM protocol over TCP.
-// Frame structure TBD — implementation pending.
+// Only sequential read (RSD) and sequential write (WSD) are supported.
+// Bit operations are not supported by this client.
 class PcLinkSumTCPClient : public IDeviceClient {
 public:
     explicit PcLinkSumTCPClient(const Model::DeviceConnection &connection);
@@ -40,9 +41,21 @@ public:
     QString errorString() const override;
 
 private:
+    QByteArray buildRsdFrame(int address, int count) const;
+    QByteArray buildWsdFrame(int address, const QVector<quint16> &values) const;
+    static QByteArray wrapFrame(const QByteArray &body);
+    static quint8 calcBodySum(const QByteArray &body);
+    static bool verifyFrameSum(const QByteArray &frame);
+
+    bool sendRequest(const QByteArray &request, QByteArray &response, QString &error);
+    bool parseRsdResponse(const QByteArray &response, int expectedCount,
+                          QVector<quint16> &out, QString &error);
+    bool parseWsdResponse(const QByteArray &response, QString &error);
+    bool checkNgResponse(const QByteArray &response, QString &error);
+
     Model::DeviceConnection m_connection;
     QTcpSocket m_socket;
-    QString m_lastError;
+    mutable QString m_lastError;
 };
 
 } // namespace Comm

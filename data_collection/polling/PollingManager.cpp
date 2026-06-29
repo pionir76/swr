@@ -38,8 +38,13 @@ bool PollingManager::start(QString& error)
     }
 
     if (!serialDevices.isEmpty()) {
-        m_serialWorker = std::make_unique<SerialWorker>(serialDevices, m_table, m_deviceList);
+        m_serialWorker = std::make_unique<SerialWorker>(
+            serialDevices, 
+            m_table, 
+            m_deviceList);
+            
         m_serialWorker->start();
+
         Util::Logger::info(QStringLiteral("SerialWorker started: %1 device(s)").arg(serialDevices.size()));
     }
 

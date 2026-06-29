@@ -30,6 +30,8 @@ enum class RegisterType {
 
 
 struct RegisterField {
+    int id = -1;
+
     QString tagName;        // Real Name (temp pv)
     QString displayName;    // Display Name (cool water temp)
 

@@ -22,9 +22,9 @@ public:
     };
 
     DataCollector(const Model::DeviceInfo &device,
-                  std::shared_ptr<Store::DeviceList> deviceList = nullptr);
+                  std::shared_ptr<Store::DeviceList> deviceList,
+                  std::unique_ptr<Comm::IDeviceClient> client);
 
-    bool initialize(QString &error);
     bool collectField(const Model::RegisterField &field,
                       QVector<quint16> &registerValues,
                       QVector<bool> &coilValues,
@@ -51,8 +51,8 @@ private:
     bool ensureConnected(QString &error);
 
     Model::DeviceInfo m_device;
-    std::shared_ptr<Store::DeviceList> m_deviceList;
-    std::unique_ptr<Comm::RegisterExecutor> m_executor;
+    std::shared_ptr<Store::DeviceList>       m_deviceList;
+    std::unique_ptr<Comm::RegisterExecutor>  m_executor;
 };
 
 } // namespace Processor

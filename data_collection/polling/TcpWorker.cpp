@@ -1,4 +1,5 @@
 #include "TcpWorker.h"
+#include "../comm/DeviceClientFactory.h"
 #include "../processor/DataCollector.h"
 #include "../../utils/Logger.h"
 
@@ -28,7 +29,8 @@ void TcpWorker::run()
 {
     m_running = true;
 
-    Processor::DataCollector collector(m_device, m_deviceList);
+    auto client = Comm::createDeviceClient(m_device.connection);
+    Processor::DataCollector collector(m_device, m_deviceList, std::move(client));
     int consecutiveErrors = 0;
     Model::DeviceInfo::Status::State prevState = Model::DeviceInfo::Status::State::Unknown;
 

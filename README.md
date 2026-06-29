@@ -192,9 +192,6 @@ swr/
 │   ├── Logger.h/.cpp           # 비동기 SQLite 로거
 │   ├── SystemMonitor.h/.cpp    # 시스템 리소스 모니터링
 │   └── NetworkConfigurator.h/.cpp
-└── webtest/                    # 웹 UI (HTML/CSS/JS)
-    ├── index.html
-    └── js/app.js
 ```
 
 ---

@@ -96,6 +96,7 @@ add_executable(swr
   data_collection/comm/modbus/ModbusTCPClient.h data_collection/comm/modbus/ModbusTCPClient.cpp
   data_collection/comm/pclink/PcLinkClient.h data_collection/comm/pclink/PcLinkClient.cpp
   data_collection/comm/IDeviceClient.h
+  data_collection/comm/SerialBus.h data_collection/comm/SerialBus.cpp
   data_collection/comm/DeviceClientFactory.h data_collection/comm/DeviceClientFactory.cpp
   data_collection/comm/RegisterExecutor.h data_collection/comm/RegisterExecutor.cpp
   data_collection/store/RegisterTable.md

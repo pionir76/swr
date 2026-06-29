@@ -113,7 +113,7 @@ private:
     bool syncDeleteDevice(int id, QString &error);
     bool syncAddRegister(int deviceId, const DataCollection::Model::RegisterField &field, QString &error);
     bool syncUpdateRegister(int deviceId, const DataCollection::Model::RegisterField &field, QString &error);
-    bool syncDeleteRegister(int deviceId, int address, const QString &type, QString &error);
+    bool syncDeleteRegister(int deviceId, int registerId, QString &error);
 
 private:
     DataCollection::Database::DeviceDatabase *m_db;

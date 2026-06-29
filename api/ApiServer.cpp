@@ -786,6 +786,7 @@ QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &requ
     QJsonArray arr;
     for (const Model::RegisterField &f : device.registers) {
         QJsonObject obj;
+        obj["id"]          = f.id;
         obj["tagName"]     = f.tagName;
         obj["displayName"] = f.displayName;
         obj["address"]     = f.address;
@@ -897,56 +898,54 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
     const QJsonObject body = doc.object();
+    const int registerId = body.value("id").toInt(-1);
     const QString tagName = body.value("tagName").toString().trimmed();
-    const QString typeStr = body.value("type").toString().trimmed();
-    if (!body.contains("address") || tagName.isEmpty() || typeStr.isEmpty()) {
+    if (registerId < 0 || tagName.isEmpty()) {
         QJsonObject err;
-        err["error"] = QStringLiteral("address, tagName and type are required");
+        err["error"] = QStringLiteral("id and tagName are required");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    const int devId   = deviceId.toInt();
-    const int address = body.value("address").toInt();
-    const Model::RegisterType type = Model::registerTypeFromString(typeStr);
+    const int devId = deviceId.toInt();
 
+    // unifiedRegisterId must survive the edit — look up the existing row by id.
+    QString loadError;
+    const QList<Model::RegisterField> existing = m_db->loadRegisters(devId, loadError);
+    const auto it = std::find_if(existing.begin(), existing.end(), [registerId](const Model::RegisterField &f) {
+        return f.id == registerId;
+    });
+    if (it == existing.end()) {
+        QJsonObject err;
+        err["error"] = QStringLiteral("Register not found: id=%1").arg(registerId);
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    const QString typeStr = body.value("type").toString(Model::registerTypeToString(it->type)).trimmed();
+    const Model::RegisterType type = Model::registerTypeFromString(typeStr);
     if (type == Model::RegisterType::Unknown) {
         QJsonObject err;
         err["error"] = QStringLiteral("Unknown register type: %1").arg(typeStr);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    // unifiedRegisterId must survive the edit — RegisterTable / external Modbus TCP
-    // mapping keys off it, so we look up the existing row instead of trusting the client.
-    QString loadError;
-    const QList<Model::RegisterField> existing = m_db->loadRegisters(devId, loadError);
-    const auto it = std::find_if(existing.begin(), existing.end(), [&](const Model::RegisterField &f) {
-        return f.address == address && f.type == type;
-    });
-    if (it == existing.end()) {
-        QJsonObject err;
-        err["error"] = QStringLiteral("Register not found: addr=%1 type=%2").arg(address).arg(typeStr);
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
-    }
-
     Model::RegisterField field;
+    field.id                = registerId;
     field.tagName           = tagName;
     field.displayName       = body.value("displayName").toString(tagName);
-    field.address           = address;
+    field.address           = body.value("address").toInt(it->address);
     field.type              = type;
-    field.readOnly          = body.value("readOnly").toBool(false);
-    field.length            = body.value("length").toInt(1);
-    field.unit              = body.value("unit").toString();
-    field.scale             = body.value("scale").toDouble(1.0);
-    field.isSigned          = body.value("isSigned").toBool(false);
-    field.bitLabels         = body.value("bitLabels").toString();
+    field.readOnly          = body.value("readOnly").toBool(it->readOnly);
+    field.length            = body.value("length").toInt(it->length);
+    field.unit              = body.value("unit").toString(it->unit);
+    field.scale             = body.value("scale").toDouble(it->scale);
+    field.isSigned          = body.value("isSigned").toBool(it->isSigned);
+    field.bitLabels         = body.value("bitLabels").toString(it->bitLabels);
+    field.byteOrder         = body.contains("byteOrder")
+                                  ? Model::byteOrderFromString(body.value("byteOrder").toString().toLower())
+                                  : it->byteOrder;
+    field.minValue          = body.contains("minValue") ? body.value("minValue").toDouble() : it->minValue;
+    field.maxValue          = body.contains("maxValue") ? body.value("maxValue").toDouble() : it->maxValue;
     field.unifiedRegisterId = it->unifiedRegisterId;
-
-    if (body.contains("byteOrder"))
-        field.byteOrder = Model::byteOrderFromString(body.value("byteOrder").toString().toLower());
-    if (body.contains("minValue"))
-        field.minValue = body.value("minValue").toDouble();
-    if (body.contains("maxValue"))
-        field.maxValue = body.value("maxValue").toDouble();
 
     QString error;
     if (!syncUpdateRegister(devId, field, error)) {
@@ -956,8 +955,8 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Register updated: device=%1 addr=%2 tag=%3")
-                           .arg(devId).arg(address).arg(tagName));
+    Util::Logger::info(QStringLiteral("Register updated: device=%1 id=%2 tag=%3")
+                           .arg(devId).arg(registerId).arg(tagName));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
@@ -980,26 +979,26 @@ QHttpServerResponse ApiServer::handleDeleteRegister(const QHttpServerRequest &re
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
     const QJsonObject body = doc.object();
-    const QString typeStr = body.value("type").toString().trimmed();
-    if (!body.contains("address") || typeStr.isEmpty()) {
+    const int registerId = body.value("id").toInt(-1);
+    
+    if (registerId < 0) {
         QJsonObject err;
-        err["error"] = QStringLiteral("address and type are required");
+        err["error"] = QStringLiteral("id is required");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    const int devId   = deviceId.toInt();
-    const int address = body.value("address").toInt();
+    const int devId = deviceId.toInt();
 
     QString error;
-    if (!syncDeleteRegister(devId, address, typeStr, error)) {
+    if (!syncDeleteRegister(devId, registerId, error)) {
         Util::Logger::error(QStringLiteral("deleteRegister failed: %1").arg(error));
         QJsonObject err;
         err["error"] = error;
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Register deleted: device=%1 addr=%2 type=%3")
-                           .arg(devId).arg(address).arg(typeStr));
+    Util::Logger::info(QStringLiteral("Register deleted: device=%1 id=%2")
+                           .arg(devId).arg(registerId));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
@@ -2160,9 +2159,9 @@ bool ApiServer::syncUpdateRegister(int deviceId, const Model::RegisterField &fie
     return true;
 }
 
-bool ApiServer::syncDeleteRegister(int deviceId, int address, const QString &type, QString &error)
+bool ApiServer::syncDeleteRegister(int deviceId, int registerId, QString &error)
 {
-    if (!m_db->deleteRegister(deviceId, address, type, error))
+    if (!m_db->deleteRegister(deviceId, registerId, error))
         return false;
 
     const QList<Model::RegisterField> fields = m_db->loadRegisters(deviceId, error);

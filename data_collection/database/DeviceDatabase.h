@@ -38,7 +38,7 @@ public:
     QList<Model::RegisterField> loadRegisters(int deviceId, QString &error) const;
     bool insertRegister(int deviceId, const Model::RegisterField &field, QString &error);
     bool updateRegister(int deviceId, const Model::RegisterField &field, QString &error);
-    bool deleteRegister(int deviceId, int address, const QString &type, QString &error);
+    bool deleteRegister(int deviceId, int registerId, QString &error);
 
     // User
     QList<Model::UserInfo> loadUsers(QString &error) const;

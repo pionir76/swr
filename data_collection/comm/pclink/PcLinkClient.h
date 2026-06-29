@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../IDeviceClient.h"
+#include "../SerialBus.h"
 #include "../../model/DeviceModels.h"
 
-#include <QSerialPort>
 #include <QVector>
 #include <QString>
 
@@ -12,34 +12,26 @@ namespace Comm {
 
 // Samwontech PCLink ASCII protocol client.
 // Supports word-register read/write only; bit operations are not available.
-// Fill in buildReadFrame() / buildWriteFrame() / parseReadResponse()
-// according to the official Samwontech PCLink specification.
 class PcLinkClient : public IDeviceClient {
 public:
-    explicit PcLinkClient(const Model::DeviceConnection &connection);
-    ~PcLinkClient() override;
+    explicit PcLinkClient(const Model::DeviceConnection &connection, SerialBus &bus);
+    ~PcLinkClient() override = default;
 
-    bool connect() override;
-    void disconnect() override;
-    bool isConnected() const override;
+    bool connect() override    { return m_bus.isOpen(); }
+    void disconnect() override { }
+    bool isConnected() const override { return m_bus.isOpen(); }
 
     bool readWords(int address, int count,
-                   QVector<quint16> &out,
-                   QString &error) override;
+                   QVector<quint16> &out, QString &error) override;
 
     bool writeWords(int address,
-                    const QVector<quint16> &values,
-                    QString &error) override;
+                    const QVector<quint16> &values, QString &error) override;
 
-    // Not supported by PCLink — always return false
-    bool readBits(int address,
-                  int count,
-                  QVector<bool> &out,
-                  QString &error) override;
+    bool readBits(int address, int count,
+                  QVector<bool> &out, QString &error) override;
 
     bool writeBits(int address,
-                   const QVector<bool> &values,
-                   QString &error) override;
+                   const QVector<bool> &values, QString &error) override;
 
     QString errorString() const override;
 
@@ -53,8 +45,8 @@ private:
     static QByteArray checksum(const QByteArray &data);
 
     Model::DeviceConnection m_connection;
-    QSerialPort m_serialPort;
-    QString m_lastError;
+    SerialBus &m_bus;
+    QString    m_lastError;
 };
 
 } // namespace Comm

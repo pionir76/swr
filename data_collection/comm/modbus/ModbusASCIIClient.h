@@ -1,9 +1,9 @@
 #pragma once
 
 #include "../IDeviceClient.h"
+#include "../SerialBus.h"
 #include "../../model/DeviceModels.h"
 
-#include <QSerialPort>
 #include <QVector>
 #include <QString>
 
@@ -12,30 +12,24 @@ namespace Comm {
 
 class ModbusASCIIClient : public IDeviceClient {
 public:
-    explicit ModbusASCIIClient(const Model::DeviceConnection &connection);
-    ~ModbusASCIIClient() override;
+    explicit ModbusASCIIClient(const Model::DeviceConnection &connection, SerialBus &bus);
+    ~ModbusASCIIClient() override = default;
 
-    bool connect() override;
-    void disconnect() override;
-    bool isConnected() const override;
+    bool connect() override    { return m_bus.isOpen(); }
+    void disconnect() override { }
+    bool isConnected() const override { return m_bus.isOpen(); }
 
     bool readWords(int address, int count,
-                   QVector<quint16> &out,
-                   QString &error) override;
+                   QVector<quint16> &out, QString &error) override;
 
     bool readBits(int address, int count,
-                  QVector<bool> &out,
-                  QString &error) override;
+                  QVector<bool> &out, QString &error) override;
 
-    // writeWords: single value uses FC06, multiple uses FC10
     bool writeWords(int address,
-                    const QVector<quint16> &values,
-                    QString &error) override;
+                    const QVector<quint16> &values, QString &error) override;
 
-    // writeBits: single value uses FC05, multiple uses FC0F
     bool writeBits(int address,
-                   const QVector<bool> &values,
-                   QString &error) override;
+                   const QVector<bool> &values, QString &error) override;
 
     QString errorString() const override;
 
@@ -48,16 +42,15 @@ private:
     QByteArray buildWriteMultipleRegistersRequest(int startAddress, const QVector<quint16> &values) const;
     static QByteArray packCoils(const QVector<bool> &values);
     static quint8 lrc(const QByteArray &data);
+
     bool sendRequest(const QByteArray &request, QByteArray &responsePdu, QString &error);
     bool parseAsciiFrame(const QByteArray &frame, QByteArray &responsePdu, QString &error) const;
-    bool verifyResponse(const QByteArray &responsePdu,
-                        quint8 expectedFunction,
-                        int expectedDataBytes,
-                        QString &error) const;
+    bool verifyResponse(const QByteArray &responsePdu, quint8 expectedFunction,
+                        int expectedDataBytes, QString &error) const;
 
     Model::DeviceConnection m_connection;
-    QSerialPort m_serialPort;
-    QString m_lastError;
+    SerialBus &m_bus;
+    QString    m_lastError;
 };
 
 } // namespace Comm

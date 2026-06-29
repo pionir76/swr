@@ -1,6 +1,8 @@
 #include "SerialWorker.h"
+#include "../comm/DeviceClientFactory.h"
 #include "../processor/DataCollector.h"
 #include "../../utils/Logger.h"
+#include "../../config/SystemConfig.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -30,6 +32,13 @@ void SerialWorker::run()
 {
     m_running = true;
 
+    QString openError;
+    Comm::SerialBus bus(SystemConfig::rs485());
+    if (!bus.open(openError)) {
+        Util::Logger::error(QStringLiteral("SerialWorker: %1").arg(openError));
+        return;
+    }
+
     std::vector<std::unique_ptr<Processor::DataCollector>> collectors;
     QVector<qint64> lastPollMs;
     QVector<int>    consecutiveErrors;
@@ -41,7 +50,9 @@ void SerialWorker::run()
     prevStates.reserve(m_devices.size());
 
     for (const Model::DeviceInfo &device : m_devices) {
-        collectors.push_back(std::make_unique<Processor::DataCollector>(device, m_deviceList));
+        auto client = Comm::createDeviceClient(device.connection, &bus);
+        collectors.push_back(
+            std::make_unique<Processor::DataCollector>(device, m_deviceList, std::move(client)));
         lastPollMs.append(0);
         consecutiveErrors.append(0);
         prevStates.append(Model::DeviceInfo::Status::State::Unknown);
@@ -110,7 +121,6 @@ void SerialWorker::run()
 
             m_deviceList->updateStatus(m_devices[i].id, status);
 
-            // ── 상태 전환 감지 → 경보 기록 ────────────────────────────────
             if (prevStates[i] != status.state) {
                 if (status.state == Model::DeviceInfo::Status::State::Error) {
                     Util::Logger::warning(
@@ -129,6 +139,8 @@ void SerialWorker::run()
         if (!anyPolled)
             msleep(10);
     }
+
+    bus.close();
 }
 
 } // namespace Polling

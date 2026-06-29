@@ -504,7 +504,7 @@ QList<Model::RegisterField> DeviceDatabase::loadRegisters(int deviceId, QString 
     QSqlQuery q(db);
 
     q.prepare(QStringLiteral(
-        "SELECT name, address, type, read_only, length, unified_register_id, "
+        "SELECT id, name, address, type, read_only, length, unified_register_id, "
         "display_name, unit, scale, is_signed, min_value, max_value, byte_order, bit_labels "
         "FROM registers "
         "WHERE device_id=:device_id "
@@ -519,26 +519,25 @@ QList<Model::RegisterField> DeviceDatabase::loadRegisters(int deviceId, QString 
 
     while (q.next()) {
         Model::RegisterField field;
-        field.tagName           = q.value(0).toString();
-        field.address           = q.value(1).toInt();
-        field.type              = Model::registerTypeFromString(q.value(2).toString());
-        field.readOnly          = q.value(3).toBool();
-        field.length            = q.value(4).toInt();
-        field.unifiedRegisterId = q.value(5).toInt();
-        field.displayName       = q.value(6).toString();
-        field.unit              = q.value(7).toString();
-        field.scale             = q.value(8).toDouble();
-        field.isSigned          = q.value(9).toInt() != 0;
+        field.id                = q.value(0).toInt();
+        field.tagName           = q.value(1).toString();
+        field.address           = q.value(2).toInt();
+        field.type              = Model::registerTypeFromString(q.value(3).toString());
+        field.readOnly          = q.value(4).toBool();
+        field.length            = q.value(5).toInt();
+        field.unifiedRegisterId = q.value(6).toInt();
+        field.displayName       = q.value(7).toString();
+        field.unit              = q.value(8).toString();
+        field.scale             = q.value(9).toDouble();
+        field.isSigned          = q.value(10).toInt() != 0;
 
-        if (!q.value(10).isNull()) {
-            field.minValue = q.value(10).toDouble();
-        }
-        if (!q.value(11).isNull()) {
-            field.maxValue = q.value(11).toDouble();
-        }
+        if (!q.value(11).isNull())
+            field.minValue = q.value(11).toDouble();
+        if (!q.value(12).isNull())
+            field.maxValue = q.value(12).toDouble();
 
-        field.byteOrder   = Model::byteOrderFromString(q.value(12).toString().toLower());
-        field.bitLabels   = q.value(13).toString();
+        field.byteOrder = Model::byteOrderFromString(q.value(13).toString().toLower());
+        field.bitLabels = q.value(14).toString();
 
         fields.append(field);
     }
@@ -612,15 +611,16 @@ bool DeviceDatabase::updateRegister(int deviceId, const Model::RegisterField &fi
     QSqlQuery q(db);
 
     q.prepare(QStringLiteral(
-        "UPDATE registers SET name=:name, type=:type, read_only=:read_only, length=:length, "
+        "UPDATE registers SET name=:name, address=:address, type=:type, read_only=:read_only, length=:length, "
         "unified_register_id=:unified_register_id, display_name=:display_name, unit=:unit, "
         "scale=:scale, is_signed=:is_signed, min_value=:min_value, max_value=:max_value, "
         "byte_order=:byte_order, bit_labels=:bit_labels "
-        "WHERE device_id=:device_id AND address=:address"));
+        "WHERE id=:id AND device_id=:device_id"));
 
+    q.bindValue(":id",                  field.id);
     q.bindValue(":device_id",           deviceId);
-    q.bindValue(":address",             field.address);
     q.bindValue(":name",                field.tagName);
+    q.bindValue(":address",             field.address);
     q.bindValue(":type",                Model::registerTypeToString(field.type));
     q.bindValue(":read_only",           field.readOnly ? 1 : 0);
     q.bindValue(":length",              field.length);
@@ -642,16 +642,15 @@ bool DeviceDatabase::updateRegister(int deviceId, const Model::RegisterField &fi
     return true;
 }
 
-bool DeviceDatabase::deleteRegister(int deviceId, int address, const QString &type, QString &error)
+bool DeviceDatabase::deleteRegister(int deviceId, int registerId, QString &error)
 {
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
 
     q.prepare(QStringLiteral(
-        "DELETE FROM registers WHERE device_id=:device_id AND address=:address AND type=:type"));
+        "DELETE FROM registers WHERE id=:id AND device_id=:device_id"));
+    q.bindValue(":id",        registerId);
     q.bindValue(":device_id", deviceId);
-    q.bindValue(":address",   address);
-    q.bindValue(":type",      type);
 
     if (!q.exec()) {
         error = q.lastError().text();
