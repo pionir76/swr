@@ -24,7 +24,7 @@ SmartRoute를 Modbus TCP 슬레이브(서버)로 동작시키는 모듈.
 | Coil / DiscreteInput / BitRegister | Holding Register (FC03) | `false → 0x0000`, `true → 0x0001` |
 | HoldingRegister / InputRegister / WordRegister | Holding Register (FC03) | rawRegisters 값 그대로 |
 
-쓰기 가능 여부는 `RegisterField.readOnly` 플래그로만 결정한다.
+쓰기 가능 여부는 `RegisterConfig.readOnly` 플래그로만 결정한다.
 원본 장비 타입이 InputRegister(원래 RO)여도, 사용자가 readOnly로 설정한 레지스터여도
 쓰기 요청 시 동일하게 **Modbus Exception Code 0x01** 로 거부한다.
 

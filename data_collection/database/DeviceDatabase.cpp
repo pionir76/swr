@@ -13,8 +13,7 @@
 namespace DataCollection {
 namespace Database{
 
-DeviceDatabase::DeviceDatabase()
-    : m_connectionName(QStringLiteral("smartroute_db"))
+DeviceDatabase::DeviceDatabase() : m_connectionName(QStringLiteral("smartroute_db"))
 {
 }
 
@@ -88,10 +87,12 @@ bool DeviceDatabase::resetSchema(QString& error)
 
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
 
-    /*
-    * SQLite foreign key 제약이 켜져 있으면 DROP 순서에 영향을 받을 수 있으므로
-    * reset 중에는 잠시 끈다.
-    */
+    //--------------------------------------------------------------------------------------------//
+    // Disable foreign key constraints temporarily during reset to avoid issues with drop order
+    // Block scope to ensure PRAGMA is executed before and after the transaction
+    // Do not remove Block scope, as it ensures that the PRAGMA is executed before and
+    // after the transaction
+    //--------------------------------------------------------------------------------------------//
     {
         QSqlQuery q(db);
         if (!q.exec(QStringLiteral("PRAGMA foreign_keys = OFF"))) {
@@ -107,11 +108,10 @@ bool DeviceDatabase::resetSchema(QString& error)
 
     QSqlQuery q(db);
 
+    //----------------------------------------------------//
+    // remove child table first (registers -> devices)
+    //----------------------------------------------------//
     const QStringList dropStatements = {
-        /*
-         * FK 관계가 있는 테이블은 자식 테이블부터 삭제한다.
-         * registers -> devices 순서
-         */
         QStringLiteral("DROP TABLE IF EXISTS registers"),
         QStringLiteral("DROP TABLE IF EXISTS devices"),
         QStringLiteral("DROP TABLE IF EXISTS users"),
@@ -134,11 +134,9 @@ bool DeviceDatabase::resetSchema(QString& error)
         }
     }
 
-    /*
-     * AUTOINCREMENT 시퀀스 초기화.
-     * sqlite_sequence 테이블은 AUTOINCREMENT 테이블이 생성된 후 생긴다.
-     * 없을 수도 있으므로 실패해도 치명적으로 보지 않는다.
-     */
+    //----------------------------------------------------//
+    // Initicialize AUTOINCREMENT sequence
+    //----------------------------------------------------//
     q.exec(QStringLiteral(
         "DELETE FROM sqlite_sequence "
         "WHERE name IN ('users', 'devices', 'registers', 'trends', 'hmi_layouts', 'sessions')"
@@ -161,9 +159,9 @@ bool DeviceDatabase::resetSchema(QString& error)
         }
     }
 
-    /*
-     * 테이블 삭제 후 현재 버전의 스키마로 다시 생성
-     */
+    //----------------------------------------------------//
+    // After remove All Table and Create Again by Init Schema.
+    //----------------------------------------------------//
     return initSchema(error);
 }
 
@@ -290,27 +288,29 @@ bool DeviceDatabase::initSchema(QString& error)
     //-----------------------------------------------------------//
     QSqlQuery chk(db);
     chk.prepare(QStringLiteral("SELECT COUNT(*) FROM users WHERE username = 'admin'"));
+
     if (!chk.exec() || !chk.next()) {
         error = chk.lastError().text();
         return false;
     }
+
     if (chk.value(0).toInt() == 0) {
         const QString hash = QString::fromLatin1(
-            QCryptographicHash::hash(QByteArrayLiteral("1234"),
-                                     QCryptographicHash::Sha256).toHex());
+                                    QCryptographicHash::hash(QByteArrayLiteral("1234"),
+                                    QCryptographicHash::Sha256).toHex());
         QSqlQuery ins(db);
         ins.prepare(QStringLiteral(
             "INSERT INTO users "
             "(id, username, display_name, description, password_hash, role, status) "
             "VALUES (0, 'admin', 'Administrator', 'Default administrator account', ?, 'admin', 'active')"
         ));
+
         ins.addBindValue(hash);
         if (!ins.exec()) {
             error = ins.lastError().text();
             return false;
         }
     }
-
     return true;
 }
 
@@ -340,27 +340,25 @@ QList<Model::DeviceInfo> DeviceDatabase::loadDevices(QString &error) const
 
     while (q.next()) {
         Model::DeviceInfo device;
-        device.id   = q.value(0).toInt();
-
-        device.deviceCode  = q.value(1).toString();
-        device.name        = q.value(2).toString();
-        device.displayName = q.value(3).toString();
-
         Model::DeviceConnection &conn = device.connection;
-
-        conn.type = Model::connectionTypeFromString(q.value(4).toString().toLower());
-
-        conn.ipAddress  = q.value(5).toString();
-        conn.tcpPort    = q.value(6).toInt();
-        conn.slaveId    = q.value(7).toInt();
-        conn.timeoutMs  = q.value(8).toInt();
-
         Model::PollingConfig &polling = device.polling;
-        polling.intervalMs  = q.value(9).toInt();
-        polling.retryCount  = q.value(10).toInt();
 
-        conn.defaultByteOrder = Model::byteOrderFromString(q.value(11).toString().toLower());
-        conn.protocol         = Model::protocolFromString(q.value(12).toString().toLower());
+        device.id               = q.value(0).toInt();
+        device.deviceCode       = q.value(1).toString();
+        device.name             = q.value(2).toString();
+        device.displayName      = q.value(3).toString();
+
+        conn.type               = Model::connectionTypeFromString(q.value(4).toString().toLower());
+        conn.ipAddress          = q.value(5).toString();
+        conn.tcpPort            = q.value(6).toInt();
+        conn.slaveId            = q.value(7).toInt();
+        conn.timeoutMs          = q.value(8).toInt();
+
+        polling.intervalMs      = q.value(9).toInt();
+        polling.retryCount      = q.value(10).toInt();
+
+        conn.defaultByteOrder   = Model::byteOrderFromString(q.value(11).toString().toLower());
+        conn.protocol           = Model::protocolFromString(q.value(12).toString().toLower());
 
         QString regError;
         device.registers = loadRegisters(device.id, regError);
@@ -491,9 +489,9 @@ bool DeviceDatabase::deleteDevice(int deviceId, QString &error)
 // ---------------------------------------------------------------------------
 // Register
 // ---------------------------------------------------------------------------
-QList<Model::RegisterField> DeviceDatabase::loadRegisters(int deviceId, QString &error) const
+QList<Model::RegisterConfig> DeviceDatabase::loadRegisters(int deviceId, QString &error) const
 {
-    QList<Model::RegisterField> fields;
+    QList<Model::RegisterConfig> fields;
 
     if (!isOpen()) {
         error = QStringLiteral("Database is not open.");
@@ -518,34 +516,39 @@ QList<Model::RegisterField> DeviceDatabase::loadRegisters(int deviceId, QString 
     }
 
     while (q.next()) {
-        Model::RegisterField field;
-        field.id                = q.value(0).toInt();
-        field.tagName           = q.value(1).toString();
-        field.address           = q.value(2).toInt();
-        field.type              = Model::registerTypeFromString(q.value(3).toString());
-        field.readOnly          = q.value(4).toBool();
-        field.length            = q.value(5).toInt();
-        field.unifiedRegisterId = q.value(6).toInt();
-        field.displayName       = q.value(7).toString();
-        field.unit              = q.value(8).toString();
-        field.scale             = q.value(9).toDouble();
-        field.isSigned          = q.value(10).toInt() != 0;
+        Model::RegisterConfig config;
 
-        if (!q.value(11).isNull())
-            field.minValue = q.value(11).toDouble();
-        if (!q.value(12).isNull())
-            field.maxValue = q.value(12).toDouble();
+        config.id                = q.value(0).toInt();
+        config.deviceId          = deviceId;
+        config.tagName           = q.value(1).toString();
+        config.address           = q.value(2).toInt();
+        config.type              = Model::registerTypeFromString(q.value(3).toString());
+        config.readOnly          = q.value(4).toBool();
+        config.length            = q.value(5).toInt();
+        config.unifiedRegisterId = q.value(6).toInt();
+        config.displayName       = q.value(7).toString();
+        config.unit              = q.value(8).toString();
+        config.scale             = q.value(9).toDouble();
+        config.isSigned          = q.value(10).toInt() != 0;
 
-        field.byteOrder = Model::byteOrderFromString(q.value(13).toString().toLower());
-        field.bitLabels = q.value(14).toString();
+        if (!q.value(11).isNull()){
+            config.minValue = q.value(11).toDouble();
+        }
 
-        fields.append(field);
+        if (!q.value(12).isNull()){
+            config.maxValue = q.value(12).toDouble();
+        }
+
+        config.byteOrder = Model::byteOrderFromString(q.value(13).toString().toLower());
+        config.bitLabels = q.value(14).toString();
+
+        fields.append(config);
     }
 
     return fields;
 }
 
-bool DeviceDatabase::insertRegister(int deviceId, const Model::RegisterField &field, QString &error)
+bool DeviceDatabase::insertRegister(int deviceId, Model::RegisterConfig &config, QString &error)
 {
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
@@ -557,57 +560,108 @@ bool DeviceDatabase::insertRegister(int deviceId, const Model::RegisterField &fi
         ":unified_register_id, :display_name, :unit, :scale, :is_signed, :min_value, :max_value, :byte_order, :bit_labels)"));
 
     q.bindValue(":device_id",           deviceId);
-    q.bindValue(":name",                field.tagName);
-    q.bindValue(":address",             field.address);
-    q.bindValue(":type",                Model::registerTypeToString(field.type));
-    q.bindValue(":read_only",           field.readOnly ? 1 : 0);
-    q.bindValue(":length",              field.length);
-    q.bindValue(":unified_register_id", field.unifiedRegisterId);
-    q.bindValue(":display_name",        field.displayName);
-    q.bindValue(":unit",                field.unit);
-    q.bindValue(":scale",               field.scale);
-    q.bindValue(":is_signed",           field.isSigned ? 1 : 0);
-    q.bindValue(":min_value",           field.minValue);
-    q.bindValue(":max_value",           field.maxValue);
-
-    q.bindValue(":byte_order",  Model::byteOrderToString(field.byteOrder));
-    q.bindValue(":bit_labels",  field.bitLabels);
+    q.bindValue(":name",                config.tagName);
+    q.bindValue(":address",             config.address);
+    q.bindValue(":type",                Model::registerTypeToString(config.type));
+    q.bindValue(":read_only",           config.readOnly ? 1 : 0);
+    q.bindValue(":length",              config.length);
+    q.bindValue(":unified_register_id", config.unifiedRegisterId);
+    q.bindValue(":display_name",        config.displayName);
+    q.bindValue(":unit",                config.unit);
+    q.bindValue(":scale",               config.scale);
+    q.bindValue(":is_signed",           config.isSigned ? 1 : 0);
+    q.bindValue(":min_value",           config.minValue);
+    q.bindValue(":max_value",           config.maxValue);
+    q.bindValue(":byte_order",          Model::byteOrderToString(config.byteOrder));
+    q.bindValue(":bit_labels",          config.bitLabels);
 
     if (!q.exec()) {
         error = q.lastError().text();
         return false;
     }
 
-    if (field.unifiedRegisterId < 0) {
-        const int rowId = q.lastInsertId().toInt();
+    config.id       = q.lastInsertId().toInt();
+    config.deviceId = deviceId;
 
+    //---------------------------------------------------------//
+    // Auto-assign unifiedRegisterId if not specified (< 0).
+    // Auto range: 1 ~ kAutoUnifiedIdMax (kManualUnifiedIdMin and above are reserved for manual assignment).
+    // The row was inserted with uid=-1 first; the actual ID is assigned via a
+    // separate UPDATE so we can reference the newly inserted row by its PK.
+    //---------------------------------------------------------//
+    if (config.unifiedRegisterId < 0) {
         QSqlQuery q2(db);
+
+        //---------------------------------------------------------//
+        // Find the next available ID within the auto-assign range.
+        // Returns 1 if no rows exist yet (COALESCE(NULL, 0) + 1).
+        //---------------------------------------------------------//
         q2.prepare(QStringLiteral(
             "SELECT COALESCE(MAX(unified_register_id), 0) + 1 "
-            "FROM registers WHERE unified_register_id >= 0"));
+            "FROM registers WHERE unified_register_id >= 0 AND unified_register_id < :max"));
+        q2.bindValue(":max", Model::kManualUnifiedIdMin);
+
         if (!q2.exec() || !q2.next()) {
             error = q2.lastError().text();
             return false;
         }
         const int newUnifiedId = q2.value(0).toInt();
 
+        //---------------------------------------------------------//
+        // Auto-assign range exhausted if MAX+1 reaches the manual range.
+        //---------------------------------------------------------//
+        if (newUnifiedId >= Model::kManualUnifiedIdMin) {
+            error = QStringLiteral("Auto-assign range exhausted (max %1)").arg(Model::kAutoUnifiedIdMax);
+            return false;
+        }
+
         QSqlQuery q3(db);
+
+        //---------------------------------------------------------//
+        // Write the assigned ID back to the row inserted above.
+        //---------------------------------------------------------//
         q3.prepare(QStringLiteral(
             "UPDATE registers SET unified_register_id=:uid WHERE id=:id"));
+
         q3.bindValue(":uid", newUnifiedId);
-        q3.bindValue(":id",  rowId);
+        q3.bindValue(":id",  config.id);
+
         if (!q3.exec()) {
             error = q3.lastError().text();
             return false;
         }
+
+        //---------------------------------------------------------//
+        // Reflect the assigned ID in the caller's config object.
+        //---------------------------------------------------------//
+        config.unifiedRegisterId = newUnifiedId;
     }
 
     return true;
 }
 
-bool DeviceDatabase::updateRegister(int deviceId, const Model::RegisterField &field, QString &error)
+bool DeviceDatabase::updateRegister(Model::RegisterConfig &config, QString &error)
 {
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+
+    if (config.unifiedRegisterId < 0) {
+        QSqlQuery q2(db);
+        q2.prepare(QStringLiteral(
+            "SELECT COALESCE(MAX(unified_register_id), 0) + 1 "
+            "FROM registers WHERE unified_register_id >= 0 AND unified_register_id < :max"));
+        q2.bindValue(":max", Model::kManualUnifiedIdMin);
+        if (!q2.exec() || !q2.next()) {
+            error = q2.lastError().text();
+            return false;
+        }
+        const int newUnifiedId = q2.value(0).toInt();
+        if (newUnifiedId >= Model::kManualUnifiedIdMin) {
+            error = QStringLiteral("Auto-assign range exhausted (max %1)").arg(Model::kAutoUnifiedIdMax);
+            return false;
+        }
+        config.unifiedRegisterId = newUnifiedId;
+    }
+
     QSqlQuery q(db);
 
     q.prepare(QStringLiteral(
@@ -615,25 +669,23 @@ bool DeviceDatabase::updateRegister(int deviceId, const Model::RegisterField &fi
         "unified_register_id=:unified_register_id, display_name=:display_name, unit=:unit, "
         "scale=:scale, is_signed=:is_signed, min_value=:min_value, max_value=:max_value, "
         "byte_order=:byte_order, bit_labels=:bit_labels "
-        "WHERE id=:id AND device_id=:device_id"));
+        "WHERE id=:id"));
 
-    q.bindValue(":id",                  field.id);
-    q.bindValue(":device_id",           deviceId);
-    q.bindValue(":name",                field.tagName);
-    q.bindValue(":address",             field.address);
-    q.bindValue(":type",                Model::registerTypeToString(field.type));
-    q.bindValue(":read_only",           field.readOnly ? 1 : 0);
-    q.bindValue(":length",              field.length);
-    q.bindValue(":unified_register_id", field.unifiedRegisterId);
-    q.bindValue(":display_name",        field.displayName);
-    q.bindValue(":unit",                field.unit);
-    q.bindValue(":scale",               field.scale);
-    q.bindValue(":is_signed",           field.isSigned ? 1 : 0);
-    q.bindValue(":min_value",           field.minValue);
-    q.bindValue(":max_value",           field.maxValue);
-
-    q.bindValue(":byte_order", Model::byteOrderToString(field.byteOrder));
-    q.bindValue(":bit_labels",  field.bitLabels);
+    q.bindValue(":id",                  config.id);
+    q.bindValue(":name",                config.tagName);
+    q.bindValue(":address",             config.address);
+    q.bindValue(":type",                Model::registerTypeToString(config.type));
+    q.bindValue(":read_only",           config.readOnly ? 1 : 0);
+    q.bindValue(":length",              config.length);
+    q.bindValue(":unified_register_id", config.unifiedRegisterId);
+    q.bindValue(":display_name",        config.displayName);
+    q.bindValue(":unit",                config.unit);
+    q.bindValue(":scale",               config.scale);
+    q.bindValue(":is_signed",           config.isSigned ? 1 : 0);
+    q.bindValue(":min_value",           config.minValue);
+    q.bindValue(":max_value",           config.maxValue);
+    q.bindValue(":byte_order",          Model::byteOrderToString(config.byteOrder));
+    q.bindValue(":bit_labels",          config.bitLabels);
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -642,15 +694,14 @@ bool DeviceDatabase::updateRegister(int deviceId, const Model::RegisterField &fi
     return true;
 }
 
-bool DeviceDatabase::deleteRegister(int deviceId, int registerId, QString &error)
+bool DeviceDatabase::deleteRegister(int registerId, QString &error)
 {
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
 
     q.prepare(QStringLiteral(
-        "DELETE FROM registers WHERE id=:id AND device_id=:device_id"));
-    q.bindValue(":id",        registerId);
-    q.bindValue(":device_id", deviceId);
+        "DELETE FROM registers WHERE id=:id"));
+    q.bindValue(":id", registerId);
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -849,7 +900,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
 
     // 1. Search User Info form DB
     q.prepare(QStringLiteral(
-        "SELECT password_hash, status, failed_login_count "
+        "SELECT id, password_hash, status, failed_login_count "
         "FROM users WHERE username=:username"));
     q.bindValue(":username", username);
 
@@ -862,9 +913,11 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     if (!q.next())
         return LoginResult::InvalidCredentials;
 
-    const QString storedHash = q.value(0).toString();
-    Model::UserStatus status = Model::userStatusFromString(q.value(1).toString());
-    int failedCount          = q.value(2).toInt();
+    const int userId         = q.value(0).toInt();
+    const QString storedHash = q.value(1).toString();
+    Model::UserStatus status = Model::userStatusFromString(q.value(2).toString());
+    int failedCount          = q.value(3).toInt();
+    const bool isDefaultAdmin = (userId == 0);
 
     // 2. Is Disabled User?
     if (status == Model::UserStatus::Disabled) {
@@ -884,26 +937,28 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
 
     // Not match for password.
     if (hash != storedHash) {
-        const int newCount = failedCount + 1;
+        if (!isDefaultAdmin) {
+            const int newCount = failedCount + 1;
 
-        if (newCount >= maxFailedAttempts) {
-            QSqlQuery lockQ(db);
-            lockQ.prepare(QStringLiteral(
-                "UPDATE users SET status='locked', failed_login_count=:count "
-                "WHERE username=:username"));
-            lockQ.bindValue(":count",    newCount);
-            lockQ.bindValue(":username", username);
-            lockQ.exec();
-            error = QStringLiteral("Account locked due to too many failed attempts. Contact administrator.");
-            return LoginResult::AccountLocked;
+            if (newCount >= maxFailedAttempts) {
+                QSqlQuery lockQ(db);
+                lockQ.prepare(QStringLiteral(
+                    "UPDATE users SET status='locked', failed_login_count=:count "
+                    "WHERE username=:username"));
+                lockQ.bindValue(":count",    newCount);
+                lockQ.bindValue(":username", username);
+                lockQ.exec();
+                error = QStringLiteral("Account locked due to too many failed attempts. Contact administrator.");
+                return LoginResult::AccountLocked;
+            }
+
+            QSqlQuery failQ(db);
+            failQ.prepare(QStringLiteral(
+                "UPDATE users SET failed_login_count=:count WHERE username=:username"));
+            failQ.bindValue(":count",    newCount);
+            failQ.bindValue(":username", username);
+            failQ.exec();
         }
-
-        QSqlQuery failQ(db);
-        failQ.prepare(QStringLiteral(
-            "UPDATE users SET failed_login_count=:count WHERE username=:username"));
-        failQ.bindValue(":count",    newCount);
-        failQ.bindValue(":username", username);
-        failQ.exec();
 
         return LoginResult::InvalidCredentials;
     }
@@ -915,6 +970,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
         "failed_login_count=0, "
         "last_login_at=CURRENT_TIMESTAMP, last_login_ip=:ip "
         "WHERE username=:username"));
+
     successQ.bindValue(":ip",       ip.isEmpty() ? QVariant(QMetaType(QMetaType::QString)) : ip);
     successQ.bindValue(":username", username);
     successQ.exec();
@@ -1023,43 +1079,9 @@ bool DeviceDatabase::deleteLoginHistory(const QString &username, QString &error)
     return true;
 }
 
-bool DeviceDatabase::insertSampleRegistersForDevice(int deviceId, Model::DeviceConnection::Protocol protocol, QString &error)
-{
-    using Proto   = Model::DeviceConnection::Protocol;
-    using RegType = Model::RegisterType;
-
-    bool isModbus = (protocol == Proto::ModbusRtu   ||
-                     protocol == Proto::ModbusTcp   ||
-                     protocol == Proto::ModbusAscii);
-    RegType regType = isModbus ? RegType::HoldingRegister : RegType::WordRegister;
-
-    for (int i = 0; i < 10; ++i) {
-        Model::RegisterField field;
-        field.tagName      = QStringLiteral("device#%1_reg_%2").arg(deviceId).arg(i, 2, 10, QChar('0'));
-        field.displayName  = QStringLiteral("테스트 레지스터 %1").arg(i, 2, 10, QChar('0'));
-        field.address      = i;
-        field.type         = regType;
-        field.readOnly     = false;
-        field.length       = 1;
-        field.unit         = QString();
-        field.scale        = 1.0;
-        field.minValue     = 0.0;
-        field.maxValue     = 65535.0;
-        field.byteOrder    = Model::ByteOrder::Default;
-
-        QString regError;
-        if (!insertRegister(deviceId, field, regError)) {
-            error = QStringLiteral("Failed to insert sample register [%1] for device %2: %3")
-                        .arg(field.tagName).arg(deviceId).arg(regError);
-            return false;
-        }
-    }
-
-    return true;
-}
-
 // ---------------------------------------------------------------------------
-// Restore
+// Restore Data
+// User can choose to restore devices, registers, and users from JSON arrays.
 // ---------------------------------------------------------------------------
 bool DeviceDatabase::restoreData(bool restoreDevices,
                                  const QJsonArray &devices,
@@ -1082,14 +1104,20 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     QSqlQuery q(db);
 
     if (restoreDevices) {
-        // 기존 devices 전체 삭제 (CASCADE → registers 자동 삭제)
+        //-----------------------------------------------------------//
+        // Remove all devices and their associated registers
+        //-----------------------------------------------------------//
         if (!q.exec(QStringLiteral("DELETE FROM devices"))) {
             error = q.lastError().text();
             db.rollback();
             return false;
         }
 
-        // devices 삽입 + old_id → new_id 매핑
+        //-----------------------------------------------------------//
+        // assuming that the "id" field in the JSON represents the old ID, 
+        // we will map it to the new ID generated by the database 
+        // upon insertion.
+        //-----------------------------------------------------------//
         QMap<int, int> idMap;
 
         for (const QJsonValue &v : devices) {
@@ -1103,6 +1131,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 "(device_code, name, display_name, conn_type, ip_address, tcp_port, "
                 "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+
             q.addBindValue(obj[QLatin1String("deviceCode")].toString());
             q.addBindValue(obj[QLatin1String("name")].toString());
             q.addBindValue(obj[QLatin1String("displayName")].toString());
@@ -1124,7 +1153,9 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             idMap[oldId] = q.lastInsertId().toInt();
         }
 
-        // registers 삽입 (deviceId 재매핑)
+        //-----------------------------------------------------------//
+        // Now insert registers, remapping device IDs using the idMap
+        //-----------------------------------------------------------//
         for (const QJsonValue &v : registers) {
             const QJsonObject obj = v.toObject();
             const int newDeviceId = idMap.value(obj[QLatin1String("deviceId")].toInt(), -1);
@@ -1159,10 +1190,14 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
         }
     }
 
+    //-----------------------------------------------------------//
+    // Restore Users
+    //-----------------------------------------------------------//
     if (restoreUsers) {
         for (const QJsonValue &v : users) {
             const QJsonObject obj  = v.toObject();
             const QString username = obj[QLatin1String("username")].toString();
+            
             if (username.isEmpty() || username == QLatin1String("admin"))
                 continue;
 
@@ -1203,294 +1238,6 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
 
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Insert Sample Data
-// ---------------------------------------------------------------------------
-
-bool DeviceDatabase::insertRefrigerationSampleDevices(QString &error)
-{
-    if (!isOpen()) {
-        error = QStringLiteral("Database is not open.");
-        return false;
-    }
-
-    using ConnType = Model::DeviceConnection::ConnectionType;
-    using Proto    = Model::DeviceConnection::Protocol;
-
-    struct SampleSpec {
-        QString  deviceCode;
-        QString  name;
-        ConnType connType;
-        Proto    protocol;
-        QString  ipAddress;
-        int      slaveId;
-    };
-
-    const QList<SampleSpec> specs = {
-        { QStringLiteral("DEV-MODBUS-TCP-01"),   QStringLiteral("Modbus TCP 프로토콜"),   ConnType::Tcp,    Proto::ModbusTcp,   QStringLiteral("192.168.0.101"), 1 },
-        { QStringLiteral("DEV-MODBUS-RTU-01"),   QStringLiteral("Modbus RTU 프로토콜"),   ConnType::Serial, Proto::ModbusRtu,   QString(),                       2 },
-        { QStringLiteral("DEV-MODBUS-ASCII-01"), QStringLiteral("Modbus ASCII 프로토콜"), ConnType::Serial, Proto::ModbusAscii, QString(),                       3 },
-        { QStringLiteral("DEV-PCLINK-01"),       QStringLiteral("PcLink 프로토콜"),       ConnType::Serial, Proto::PcLink,      QString(),                       4 },
-        { QStringLiteral("DEV-PCLINK-SUM-01"),   QStringLiteral("PcLink Sum 프로토콜"),   ConnType::Serial, Proto::PcLinkSum,   QString(),                       5 },
-    };
-
-    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
-
-    if (!db.transaction()) {
-        error = db.lastError().text();
-        return false;
-    }
-
-    for (const SampleSpec &spec : specs) {
-        Model::DeviceInfo device;
-        device.id          = -1;
-        device.deviceCode  = spec.deviceCode;
-        device.name        = spec.name;
-        device.displayName = spec.name;
-
-        device.connection.type             = spec.connType;
-        device.connection.protocol         = spec.protocol;
-        device.connection.ipAddress        = spec.ipAddress;
-        device.connection.tcpPort          = 502;
-        device.connection.slaveId          = spec.slaveId;
-        device.connection.timeoutMs        = 3000;
-        device.connection.defaultByteOrder = Model::ByteOrder::BigEndian;
-
-        device.polling.intervalMs  = 1000;
-        device.polling.retryCount  = 3;
-
-        QString insertError;
-        if (!insertDevice(device, insertError)) {
-            db.rollback();
-            error = QStringLiteral("Failed to insert sample device [%1]: %2")
-                        .arg(spec.name, insertError);
-            return false;
-        }
-
-        QSqlQuery idQuery(db);
-        if (!idQuery.exec(QStringLiteral("SELECT last_insert_rowid()")) || !idQuery.next()) {
-            db.rollback();
-            error = QStringLiteral("Failed to retrieve ID for device [%1]").arg(spec.name);
-            return false;
-        }
-        int deviceId = idQuery.value(0).toInt();
-
-        if (!insertSampleRegistersForDevice(deviceId, spec.protocol, insertError)) {
-            db.rollback();
-            error = insertError;
-            return false;
-        }
-    }
-
-    if (!db.commit()) {
-        error = db.lastError().text();
-        db.rollback();
-        return false;
-    }
-
-    return true;
-}
-
-/*
-bool DeviceDatabase::insertRefrigerationSampleDevices(QString &error)
-{
-    if (!isOpen()) {
-        error = QStringLiteral("Database is not open.");
-        return false;
-    }
-
-    QList<Model::DeviceInfo> devices;
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-CHILLER-01"),
-        QStringLiteral("냉동기 1호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.101"),
-        1,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-CHILLER-02"),
-        QStringLiteral("냉동기 2호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.102"),
-        2,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-COMP-01"),
-        QStringLiteral("압축기 1호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        3,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-COMP-02"),
-        QStringLiteral("압축기 2호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        4,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-COND-01"),
-        QStringLiteral("응축기 1호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        5,
-        1500));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-COND-02"),
-        QStringLiteral("응축기 2호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        6,
-        1500));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-EVAP-01"),
-        QStringLiteral("증발기 1호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        7,
-        1500));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-EVAP-02"),
-        QStringLiteral("증발기 2호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        8,
-        1500));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-PUMP-CHW-01"),
-        QStringLiteral("냉수 펌프 1호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.111"),
-        9,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-PUMP-CHW-02"),
-        QStringLiteral("냉수 펌프 2호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.112"),
-        10,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-PUMP-CW-01"),
-        QStringLiteral("냉각수 펌프 1호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.113"),
-        11,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-PUMP-CW-02"),
-        QStringLiteral("냉각수 펌프 2호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.114"),
-        12,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-CT-01"),
-        QStringLiteral("냉각탑 1호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.121"),
-        13,
-        2000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-CT-02"),
-        QStringLiteral("냉각탑 2호기"),
-        Model::DeviceConnection::ConnectionType::Tcp,
-        QStringLiteral("192.168.0.122"),
-        14,
-        2000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-FAN-01"),
-        QStringLiteral("냉각팬 1호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        15,
-        2000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-FAN-02"),
-        QStringLiteral("냉각팬 2호기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        16,
-        2000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-TANK-01"),
-        QStringLiteral("브라인 탱크"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        17,
-        3000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-FLOW-01"),
-        QStringLiteral("냉수 유량계"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        18,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-PRESS-01"),
-        QStringLiteral("냉매 압력 계측기"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        19,
-        1000));
-
-    devices.append(makeSampleDevice(
-        QStringLiteral("DEV-TEMP-01"),
-        QStringLiteral("온도 계측 모듈"),
-        Model::DeviceConnection::ConnectionType::Serial,
-        QString(),
-        20,
-        1000));
-
-    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
-
-    if (!db.transaction()) {
-        error = db.lastError().text();
-        return false;
-    }
-
-    for (const Model::DeviceInfo &device : devices) {
-        QString insertError;
-
-        if (!insertDevice(device, insertError)) {
-            db.rollback();
-
-            error = QStringLiteral("Failed to insert sample device [%1]: %2")
-                        .arg(device.name, insertError);
-            return false;
-        }
-    }
-
-    if (!db.commit()) {
-        error = db.lastError().text();
-        db.rollback();
-        return false;
-    }
-
-    return true;
-}
-*/
-
 
 bool DeviceDatabase::factoryReset(QString &error)
 {

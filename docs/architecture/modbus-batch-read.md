@@ -66,17 +66,18 @@ struct FieldResult {
 
 ## 배치 그룹핑 알고리즘
 
-`DataCollector::buildBatches()` — `m_device.registers`를 입력으로 받아 `QList<RegisterBatch>` 반환.
+`DataCollector::buildBatches()` — 생성자에서 1회 호출되어 `m_batches`에 캐시됨.
 
 ```
-1. m_device.registers 순서 그대로 순회 (사용자가 정의한 순서 유지)
-2. 현재 필드가 현재 배치에 추가 가능한지 판단:
+1. m_device.registers 인덱스 배열 생성 후 (type, address) 기준으로 정렬
+   → 비연속 주소라도 정렬 후 연속이면 같은 배치로 묶임
+2. 정렬된 순서로 순회하며 현재 필드가 현재 배치에 추가 가능한지 판단:
      - 첫 번째 필드이거나 currentBatch가 없으면 → 새 배치 시작
      - field.type != currentBatch.type → 새 배치 시작
      - field.address != currentBatch.startAddress + currentBatch.totalLength → 새 배치 시작
      - currentBatch.totalLength + field.length > MAX_READ_QUANTITY → 새 배치 시작
 3. 추가 가능하면: slice.offset = currentBatch.totalLength, currentBatch.totalLength += field.length
-4. m_device.registers 전체 순회 후 마지막 배치 확정
+4. 전체 순회 후 마지막 배치 확정 → QList<RegisterBatch> 반환
 ```
 
 결과 예시 (HoldingRegister, MAX=64):
@@ -161,8 +162,8 @@ for (const RegisterField &field : m_devices[i].registers) {
 const QList<FieldResult> results = collectors[i]->collectAllFields();
 for (int fi = 0; fi < m_devices[i].registers.size(); ++fi) {
     const auto &r = results.at(fi);
-    m_table->updateUnifiedRegister(m_devices[i].id, m_devices[i].registers[fi],
-                                   r.registerValues, r.coilValues, r.ok, r.error, ...);
+    m_registerTable->updateState(m_devices[i].registers[fi],
+                                 r.registerValues, r.coilValues, r.ok, r.error, ...);
     if (!r.ok) { allOk = false; lastError = r.error; }
 }
 ```

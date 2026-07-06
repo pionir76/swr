@@ -15,27 +15,21 @@ class RegisterTable {
 
 public:
     void clear();
-    void updateUnifiedRegister(int deviceId,
-                               const Model::RegisterField &field,
-                               const QVector<quint16> &registerValues,
-                               const QVector<bool> &coilValues,
-                               bool success,
-                               const QString &errorMessage,
-                               int pollingIntervalMs);
+    void updateState(const Model::RegisterConfig &config,
+                     const QVector<quint16> &registerValues,
+                     const QVector<bool> &coilValues,
+                     bool success,
+                     const QString &errorMessage,
+                     int pollingIntervalMs);
 
-    Model::UnifiedRegister unifiedRegister(int unifiedId) const;
-    QList<Model::UnifiedRegister> unifiedRegisters() const;
+    Model::RegisterState state(int unifiedId) const;
+    QList<Model::RegisterState> states() const;
 
 private:
-    int resolveUnifiedId(int deviceId, const Model::RegisterField &field);
-    QString fieldKey(int deviceId, const Model::RegisterField &field) const;
-    double computeScaledValue(const Model::UnifiedRegister &entry) const;
+    double computeScaledValue(const Model::RegisterState &entry) const;
 
     mutable QMutex m_mutex;
-    QHash<int, Model::UnifiedRegister> m_unifiedRegisters;
-    QHash<QString, int> m_fieldToUnifiedId;
-    QSet<int> m_usedIds;
-    int m_nextUnifiedId = 1;
+    QHash<int, Model::RegisterState> m_states;
 
 };
 

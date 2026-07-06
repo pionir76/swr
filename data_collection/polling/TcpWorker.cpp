@@ -14,7 +14,7 @@ TcpWorker::TcpWorker(Model::DeviceInfo device,
                      QObject *parent)
     : QThread(parent)
     , m_device(std::move(device))
-    , m_table(std::move(table))
+    , m_registerTable(std::move(table))
     , m_deviceList(std::move(deviceList))
 {
 }
@@ -48,11 +48,10 @@ void TcpWorker::run()
             if (!m_running) break;
 
             const Processor::DataCollector::FieldResult &r     = results.at(fi);
-            const Model::RegisterField                  &field = m_device.registers.at(fi);
+            const Model::RegisterConfig                 &config = m_device.registers.at(fi);
 
-            m_table->updateUnifiedRegister(
-                m_device.id,
-                field,
+            m_registerTable->updateState(
+                config,
                 r.registerValues,
                 r.coilValues,
                 r.ok,
@@ -62,8 +61,9 @@ void TcpWorker::run()
             if (!r.ok) {
                 allOk     = false;
                 lastError = r.error;
-                qWarning("TCP poll failed [device %d, field %s]: %s",
-                         m_device.id, qPrintable(field.tagName), qPrintable(r.error));
+
+                qWarning("TCP poll failed [device %d, register %s]: %s",
+                         m_device.id, qPrintable(config.tagName), qPrintable(r.error));
             }
         }
 

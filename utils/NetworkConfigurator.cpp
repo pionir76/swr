@@ -43,6 +43,7 @@ static bool runCommand(const QString &program, const QStringList &arguments, QSt
 {
     QProcess process;
     process.start(program, arguments);
+    
     if (!process.waitForFinished(5000)) {
         error = QStringLiteral("Command timed out: %1").arg(program);
         return false;

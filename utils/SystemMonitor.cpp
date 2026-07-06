@@ -195,6 +195,13 @@ void SystemMonitor::readNetwork(SystemResources &res) const
 
         NetStat net;
         net.iface   = iface;
+        
+        //---------------------------------------------------------//
+        // TODO: Currently reports cumulative bytes since boot, 
+        // not real-time bandwidth.To compute bytes/sec, store 
+        // previous sample (m_prevNet) and calculate delta per interval, 
+        // similar to how CPU usage is computed via m_prevCpu.
+        //---------------------------------------------------------//
         net.rxBytes = parts[0].toLongLong();
         net.txBytes = parts[8].toLongLong();
         res.network.append(net);

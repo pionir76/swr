@@ -122,11 +122,13 @@ void ApiServer::setupRoutes()
                    [this](const QString &id, const QHttpServerRequest &req) { return handleGetRegisters(req, id); });
     m_server.route("/api/devices/<arg>/registers", QHttpServerRequest::Method::Post,
                    [this](const QString &id, const QHttpServerRequest &req) { return handlePostRegister(req, id); });
-    m_server.route("/api/devices/<arg>/registers", QHttpServerRequest::Method::Put,
+    m_server.route("/api/registers/unified-id/check", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleCheckUnifiedId(req); });
+    m_server.route("/api/registers/<arg>", QHttpServerRequest::Method::Put,
                    [this](const QString &id, const QHttpServerRequest &req) { return handlePutRegister(req, id); });
-    m_server.route("/api/devices/<arg>/registers", QHttpServerRequest::Method::Delete,
+    m_server.route("/api/registers/<arg>", QHttpServerRequest::Method::Delete,
                    [this](const QString &id, const QHttpServerRequest &req) { return handleDeleteRegister(req, id); });
-    m_server.route("/api/devices/<arg>/registers/write", QHttpServerRequest::Method::Post,
+    m_server.route("/api/registers/<arg>/write", QHttpServerRequest::Method::Post,
                    [this](const QString &id, const QHttpServerRequest &req) { return handleWriteRegister(req, id); });
 
 
@@ -198,17 +200,52 @@ void ApiServer::setupRoutes()
 // ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
-bool ApiServer::isAuthenticated(const QHttpServerRequest &request) const
+std::optional<QHttpServerResponse> ApiServer::requireAuth(const QHttpServerRequest &request, RequiredRole required) const
 {
     const QByteArray auth = request.value("Authorization");
+
     if (auth.isEmpty()){
-        return false;
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
     }
 
     const QString token = QString::fromUtf8(auth).remove(QStringLiteral("Bearer ")).trimmed();
 
-    QMutexLocker locker(&m_sessionMutex);
-    return m_sessions.contains(token);
+    QString username;
+    {
+        QMutexLocker locker(&m_sessionMutex);
+
+        if (!m_sessions.contains(token)){
+            return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+        }
+        username = m_sessionUsers.value(token);
+    }
+
+    if (required == RequiredRole::Any)
+        return std::nullopt;
+
+    QString dbError;
+    bool found = false;
+    
+    const Model::UserInfo user = m_db->loadUser(username, found, dbError);
+    if (!found || !dbError.isEmpty())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+
+    const bool isAdmin   = (user.role == Model::UserRole::Admin);
+    const bool isManager = (user.role == Model::UserRole::Manager);
+
+    if (required == RequiredRole::AdminOnly && !isAdmin) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    if (required == RequiredRole::ManagerOrAbove && !isAdmin && !isManager) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Manager or Admin role required");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+
+    return std::nullopt;
 }
 
 QString ApiServer::createSession(const QString &username)
@@ -243,7 +280,6 @@ bool ApiServer::rejectIfPolling(QHttpServerResponse &out) const
 QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    qDebug() << doc;
 
     if (!doc.isObject())
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
@@ -264,10 +300,10 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
                         dbError);
 
     Model::LoginHistoryEntry hist;
+
     hist.username = username;
     hist.action   = QStringLiteral("login");
-    hist.result   = (result == DataCollection::Database::LoginResult::Success)
-                        ? QStringLiteral("success") : QStringLiteral("fail");
+    hist.result   = (result == DataCollection::Database::LoginResult::Success) ? QStringLiteral("success") : QStringLiteral("fail");
     hist.ip       = ip;
 
     QString histError;
@@ -276,27 +312,34 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
     switch (result) {
     case DataCollection::Database::LoginResult::Success: {
         const QString token = createSession(username);
+        
         Util::Logger::info(QStringLiteral("User logged in: %1 from %2").arg(username, ip));
         QJsonObject resp;
         resp[QLatin1String("token")] = token;
+
         return QHttpServerResponse(resp);
     }
     case DataCollection::Database::LoginResult::AccountDisabled: {
         Util::Logger::warning(QStringLiteral("Login denied (disabled): %1 from %2").arg(username, ip));
+
         QJsonObject err;
         err[QLatin1String("error")]  = QStringLiteral("Account is disabled.");
         err[QLatin1String("reason")] = QStringLiteral("disabled");
+        
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
     case DataCollection::Database::LoginResult::AccountLocked: {
         Util::Logger::warning(QStringLiteral("Login denied (locked): %1 from %2").arg(username, ip));
+
         QJsonObject err;
         err[QLatin1String("error")]  = QStringLiteral("Account is locked. Contact administrator.");
         err[QLatin1String("reason")] = QStringLiteral("locked");
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
     default:
         Util::Logger::warning(QStringLiteral("Login failed (bad credentials): %1 from %2").arg(username, ip));
+
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
     }
 }
@@ -305,6 +348,7 @@ QHttpServerResponse ApiServer::handleLogout(const QHttpServerRequest &request)
 {
     const QString token    = QString::fromUtf8(request.value("Authorization"))
                                  .remove(QStringLiteral("Bearer ")).trimmed();
+
     const QString username = removeSession(token);
     const QString ip       = request.remoteAddress().toString();
 
@@ -324,8 +368,7 @@ QHttpServerResponse ApiServer::handleLogout(const QHttpServerRequest &request)
 
 QHttpServerResponse ApiServer::handleSession(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     QJsonObject resp;
     resp["valid"] = true;
@@ -340,8 +383,7 @@ QHttpServerResponse ApiServer::handleSession(const QHttpServerRequest &request)
 // ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     static constexpr int kDashAlertLimit    = 20;
     static constexpr int kDashLogLimit      = 20;
@@ -407,12 +449,12 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     }
 
     // ── 3. Realtime registers (top N, newest by lastUpdated) ────────────────
-    const QList<Model::UnifiedRegister> allRegs = m_registerTable->unifiedRegisters();
+    const QList<Model::RegisterState> allRegs = m_registerTable->states();
     const QDateTime now = QDateTime::currentDateTimeUtc();
 
     QJsonArray realtimeArr;
     int realtimeCount = 0;
-    for (const Model::UnifiedRegister &r : allRegs) {
+    for (const Model::RegisterState &r : allRegs) {
         if (realtimeCount >= kDashRealtimeLimit)
             break;
 
@@ -426,18 +468,18 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         }
 
         QJsonObject obj;
-        obj["id"]           = r.id;
-        obj["tagName"]      = r.tagName;
-        obj["displayName"]  = r.displayName;
-        obj["deviceId"]     = r.deviceId;
-        obj["address"]      = r.deviceAddress;
-        obj["sourceType"]   = Model::registerTypeToString(r.sourceType);
-        obj["unit"]         = r.unit;
+        obj["id"]           = r.config.unifiedRegisterId;
+        obj["tagName"]      = r.config.tagName;
+        obj["displayName"]  = r.config.displayName;
+        obj["deviceId"]     = r.config.deviceId;
+        obj["address"]      = r.config.address;
+        obj["sourceType"]   = Model::registerTypeToString(r.config.type);
+        obj["unit"]         = r.config.unit;
         obj["scaledValue"]  = r.scaledValue;
-        obj["scale"]        = r.scale;
+        obj["scale"]        = r.config.scale;
         obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
-        obj["bitLabels"]    = r.bitLabels;
-        obj["readOnly"]     = r.readOnly;
+        obj["bitLabels"]    = r.config.bitLabels;
+        obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
         obj["outOfRange"]   = r.outOfRange;
         obj["quality"]      = Model::dataQualityToString(quality);
@@ -485,8 +527,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
 
 QHttpServerResponse ApiServer::handleGetPollingStatus(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     QJsonObject resp;
     resp["running"] = m_pollingManager->isRunning();
@@ -495,8 +536,7 @@ QHttpServerResponse ApiServer::handleGetPollingStatus(const QHttpServerRequest &
 
 QHttpServerResponse ApiServer::handleStartPolling(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     QString error;
     if (!m_pollingManager->start(error)) {
@@ -513,8 +553,7 @@ QHttpServerResponse ApiServer::handleStartPolling(const QHttpServerRequest &requ
 
 QHttpServerResponse ApiServer::handleStopPolling(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     m_pollingManager->stop();
     Util::Logger::info(QStringLiteral("Polling stopped via API."));
@@ -530,9 +569,7 @@ QHttpServerResponse ApiServer::handleStopPolling(const QHttpServerRequest &reque
 // ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetDevices(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
@@ -563,9 +600,7 @@ QHttpServerResponse ApiServer::handleGetDevices(const QHttpServerRequest &reques
 
 QHttpServerResponse ApiServer::handleGetDeviceStatus(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
@@ -597,9 +632,7 @@ QHttpServerResponse ApiServer::handleGetDeviceStatus(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
 
@@ -627,6 +660,7 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
 
     Model::DeviceConnection &conn = device.connection;
     const QString connTypeStr = body.value("connType").toString(QStringLiteral("serial")).toLower();
+
     conn.type      = Model::connectionTypeFromString(connTypeStr);
     conn.ipAddress = body.value("ipAddress").toString(conn.ipAddress);
     conn.tcpPort   = body.value("tcpPort").toInt(conn.tcpPort);
@@ -675,9 +709,7 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
 
 QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request, const QString &id)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
 
@@ -692,11 +724,13 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
 
     const int deviceId = id.toInt();
     Model::DeviceInfo device;
+
     try {
         device = m_deviceList->get(deviceId);
     } catch (const std::out_of_range &) {
         QJsonObject err;
         err["error"] = QStringLiteral("Device not found");
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
     }
 
@@ -710,24 +744,30 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     if (body.contains("timeoutMs"))   device.connection.timeoutMs = body.value("timeoutMs").toInt();
     if (body.contains("intervalMs"))  device.polling.intervalMs   = body.value("intervalMs").toInt();
     if (body.contains("retryCount"))  device.polling.retryCount   = body.value("retryCount").toInt();
+
     if (body.contains("byteOrder")) {
         const QString byteOrderStr = body.value("byteOrder").toString().toLower();
         device.connection.defaultByteOrder = Model::byteOrderFromString(byteOrderStr);
+
         if (device.connection.defaultByteOrder == Model::ByteOrder::Default) {
             QJsonObject err;
             err["error"] = QStringLiteral("byteOrder must be 'big' or 'little' for a device: %1").arg(byteOrderStr);
+
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
     }
+
     if (body.contains("connType"))
-        device.connection.type = Model::connectionTypeFromString(
-            body.value("connType").toString().toLower());
+        device.connection.type = Model::connectionTypeFromString(body.value("connType").toString().toLower());
+
     if (body.contains("protocol")) {
         const QString protocolStr = body.value("protocol").toString().toLower();
         device.connection.protocol = Model::protocolFromString(protocolStr);
+
         if (device.connection.protocol == Model::DeviceConnection::Protocol::Unknown) {
             QJsonObject err;
             err["error"] = QStringLiteral("Unknown protocol: %1").arg(protocolStr);
+
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
     }
@@ -737,6 +777,7 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
         Util::Logger::error(QStringLiteral("updateDevice failed: %1").arg(error));
         QJsonObject err;
         err["error"] = error;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
@@ -744,15 +785,14 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
-
 QHttpServerResponse ApiServer::handleDeleteDevice(const QHttpServerRequest &request, const QString &id)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
-    if (rejectIfPolling(conflict)) return conflict;
+
+    if (rejectIfPolling(conflict)) 
+        return conflict;
 
     QString error;
     if (!syncDeleteDevice(id.toInt(), error)) {
@@ -770,9 +810,7 @@ QHttpServerResponse ApiServer::handleDeleteDevice(const QHttpServerRequest &requ
 QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &request,
                                                   const QString &deviceId)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     Model::DeviceInfo device;
     try {
@@ -784,7 +822,7 @@ QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &requ
     }
 
     QJsonArray arr;
-    for (const Model::RegisterField &f : device.registers) {
+    for (const Model::RegisterConfig &f : device.registers) {
         QJsonObject obj;
         obj["id"]          = f.id;
         obj["tagName"]     = f.tagName;
@@ -799,7 +837,8 @@ QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &requ
         obj["bitLabels"]   = f.bitLabels;
         obj["minValue"]    = f.minValue;
         obj["maxValue"]    = f.maxValue;
-        obj["byteOrder"]   = Model::byteOrderToString(f.byteOrder);
+        obj["byteOrder"]          = Model::byteOrderToString(f.byteOrder);
+        obj["unifiedRegisterId"]  = f.unifiedRegisterId;
 
         arr.append(obj);
     }
@@ -812,9 +851,7 @@ QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &requ
 QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &request,
                                                   const QString &deviceId)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
 
@@ -837,34 +874,52 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    Model::RegisterField field;
-    field.tagName     = tagName;
-    field.displayName = body.value("displayName").toString(tagName);
-    field.address     = body.value("address").toInt(0);
-    field.type        = Model::registerTypeFromString(typeStr);
-    field.readOnly    = body.value("readOnly").toBool(false);
-    field.length      = body.value("length").toInt(1);
-    field.unit        = body.value("unit").toString();
-    field.scale       = body.value("scale").toDouble(1.0);
-    field.isSigned    = body.value("isSigned").toBool(false);
-    field.bitLabels   = body.value("bitLabels").toString();
+    Model::RegisterConfig config;
+    config.tagName     = tagName;
+    config.displayName = body.value("displayName").toString(tagName);
+    config.address     = body.value("address").toInt(0);
+    config.type        = Model::registerTypeFromString(typeStr);
+    config.readOnly    = body.value("readOnly").toBool(false);
+    config.length      = body.value("length").toInt(1);
+    config.unit        = body.value("unit").toString();
+    config.scale       = body.value("scale").toDouble(1.0);
+    config.isSigned    = body.value("isSigned").toBool(false);
+    config.bitLabels   = body.value("bitLabels").toString();
 
     if (body.contains("byteOrder"))
-        field.byteOrder = Model::byteOrderFromString(body.value("byteOrder").toString().toLower());
-    if (body.contains("minValue"))
-        field.minValue = body.value("minValue").toDouble();
-    if (body.contains("maxValue"))
-        field.maxValue = body.value("maxValue").toDouble();
+        config.byteOrder = Model::byteOrderFromString(body.value("byteOrder").toString().toLower());
 
-    if (field.type == Model::RegisterType::Unknown) {
+    if (body.contains("minValue"))
+        config.minValue = body.value("minValue").toDouble();
+
+    if (body.contains("maxValue"))
+        config.maxValue = body.value("maxValue").toDouble();
+
+    if (body.contains("unifiedRegisterId")) {
+        const int uid = body.value("unifiedRegisterId").toInt(-1);
+        if (uid >= 0 && uid < Model::kManualUnifiedIdMin) {
+            QJsonObject err;
+            err["error"] = QStringLiteral("Manual unifiedRegisterId must be >= %1").arg(Model::kManualUnifiedIdMin);
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        config.unifiedRegisterId = uid;
+    }
+
+    if (config.type == Model::RegisterType::Unknown) {
         QJsonObject err;
         err["error"] = QStringLiteral("Unknown register type: %1").arg(typeStr);
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
     const int devId = deviceId.toInt();
     QString error;
-    if (!syncAddRegister(devId, field, error)) {
+    if (!syncAddRegister(devId, config, error)) {
+        if (error.contains(QLatin1String("UNIQUE"), Qt::CaseInsensitive)) {
+            QJsonObject err;
+            err["error"] = QStringLiteral("unifiedRegisterId already in use");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
+        }
         Util::Logger::error(QStringLiteral("addRegister failed: %1").arg(error));
         QJsonObject err;
         err["error"] = error;
@@ -872,55 +927,47 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
     }
 
     Util::Logger::info(QStringLiteral("Register added: device=%1 tag=%2").arg(devId).arg(tagName));
+
+    // return the created register ID info in the response
     QJsonObject resp;
-    resp["tagName"] = field.tagName;
-    resp["address"] = field.address;
-    resp["type"]    = Model::registerTypeToString(field.type);
+    resp["tagName"]           = config.tagName;
+    resp["address"]           = config.address;
+    resp["type"]              = Model::registerTypeToString(config.type);
+    resp["unifiedRegisterId"] = config.unifiedRegisterId;
+
     return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Created);
 }
 
 QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &request,
-                                                 const QString &deviceId)
+                                                 const QString &registerId)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
-
-    // We can't modify device list while polling data.
-    if (rejectIfPolling(conflict)){
+    if (rejectIfPolling(conflict))
         return conflict;
-    }
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
     const QJsonObject body = doc.object();
-    const int registerId = body.value("id").toInt(-1);
     const QString tagName = body.value("tagName").toString().trimmed();
-    if (registerId < 0 || tagName.isEmpty()) {
+    if (tagName.isEmpty()) {
         QJsonObject err;
-        err["error"] = QStringLiteral("id and tagName are required");
+        err["error"] = QStringLiteral("tagName is required");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    const int devId = deviceId.toInt();
-
-    // unifiedRegisterId must survive the edit — look up the existing row by id.
-    QString loadError;
-    const QList<Model::RegisterField> existing = m_db->loadRegisters(devId, loadError);
-    const auto it = std::find_if(existing.begin(), existing.end(), [registerId](const Model::RegisterField &f) {
-        return f.id == registerId;
-    });
-    if (it == existing.end()) {
+    bool found = false;
+    const Model::RegisterConfig existing = m_deviceList->findByRegisterId(registerId.toInt(), found);
+    if (!found) {
         QJsonObject err;
         err["error"] = QStringLiteral("Register not found: id=%1").arg(registerId);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
     }
 
-    const QString typeStr = body.value("type").toString(Model::registerTypeToString(it->type)).trimmed();
+    const QString typeStr = body.value("type").toString(Model::registerTypeToString(existing.type)).trimmed();
     const Model::RegisterType type = Model::registerTypeFromString(typeStr);
     if (type == Model::RegisterType::Unknown) {
         QJsonObject err;
@@ -928,125 +975,124 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    Model::RegisterField field;
-    field.id                = registerId;
-    field.tagName           = tagName;
-    field.displayName       = body.value("displayName").toString(tagName);
-    field.address           = body.value("address").toInt(it->address);
-    field.type              = type;
-    field.readOnly          = body.value("readOnly").toBool(it->readOnly);
-    field.length            = body.value("length").toInt(it->length);
-    field.unit              = body.value("unit").toString(it->unit);
-    field.scale             = body.value("scale").toDouble(it->scale);
-    field.isSigned          = body.value("isSigned").toBool(it->isSigned);
-    field.bitLabels         = body.value("bitLabels").toString(it->bitLabels);
-    field.byteOrder         = body.contains("byteOrder")
+    Model::RegisterConfig config;
+    config.id                = existing.id;
+    config.deviceId          = existing.deviceId;
+    config.tagName           = tagName;
+    config.displayName       = body.value("displayName").toString(tagName);
+    config.address           = body.value("address").toInt(existing.address);
+    config.type              = type;
+    config.readOnly          = body.value("readOnly").toBool(existing.readOnly);
+    config.length            = body.value("length").toInt(existing.length);
+    config.unit              = body.value("unit").toString(existing.unit);
+    config.scale             = body.value("scale").toDouble(existing.scale);
+    config.isSigned          = body.value("isSigned").toBool(existing.isSigned);
+    config.bitLabels         = body.value("bitLabels").toString(existing.bitLabels);
+    config.byteOrder         = body.contains("byteOrder")
                                   ? Model::byteOrderFromString(body.value("byteOrder").toString().toLower())
-                                  : it->byteOrder;
-    field.minValue          = body.contains("minValue") ? body.value("minValue").toDouble() : it->minValue;
-    field.maxValue          = body.contains("maxValue") ? body.value("maxValue").toDouble() : it->maxValue;
-    field.unifiedRegisterId = it->unifiedRegisterId;
+                                  : existing.byteOrder;
+    config.minValue          = body.contains("minValue") ? body.value("minValue").toDouble() : existing.minValue;
+    config.maxValue          = body.contains("maxValue") ? body.value("maxValue").toDouble() : existing.maxValue;
+
+    if (body.contains("unifiedRegisterId")) {
+        const int uid = body.value("unifiedRegisterId").toInt(existing.unifiedRegisterId);
+        if (uid >= 0 && uid < Model::kManualUnifiedIdMin) {
+            QJsonObject err;
+            err["error"] = QStringLiteral("Manual unifiedRegisterId must be >= %1").arg(Model::kManualUnifiedIdMin);
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        config.unifiedRegisterId = uid;
+    } else {
+        config.unifiedRegisterId = existing.unifiedRegisterId;
+    }
 
     QString error;
-    if (!syncUpdateRegister(devId, field, error)) {
+    if (!syncUpdateRegister(config, error)) {
+        if (error.contains(QLatin1String("UNIQUE"), Qt::CaseInsensitive)) {
+            QJsonObject err;
+            err["error"] = QStringLiteral("unifiedRegisterId already in use");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
+        }
         Util::Logger::error(QStringLiteral("updateRegister failed: %1").arg(error));
         QJsonObject err;
         err["error"] = error;
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Register updated: device=%1 id=%2 tag=%3")
-                           .arg(devId).arg(registerId).arg(tagName));
+    Util::Logger::info(QStringLiteral("Register updated: id=%1 tag=%2").arg(registerId).arg(tagName));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
 QHttpServerResponse ApiServer::handleDeleteRegister(const QHttpServerRequest &request,
-                                                    const QString &deviceId)
+                                                    const QString &registerId)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
-
-    // We can't modify device list while polling data.
-    if (rejectIfPolling(conflict)){
+    if (rejectIfPolling(conflict))
         return conflict;
-    }
-
-    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    if (!doc.isObject())
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
-
-    const QJsonObject body = doc.object();
-    const int registerId = body.value("id").toInt(-1);
-    
-    if (registerId < 0) {
-        QJsonObject err;
-        err["error"] = QStringLiteral("id is required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
-    }
-
-    const int devId = deviceId.toInt();
 
     QString error;
-    if (!syncDeleteRegister(devId, registerId, error)) {
+    if (!syncDeleteRegister(registerId.toInt(), error)) {
         Util::Logger::error(QStringLiteral("deleteRegister failed: %1").arg(error));
         QJsonObject err;
         err["error"] = error;
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Register deleted: device=%1 id=%2")
-                           .arg(devId).arg(registerId));
+    Util::Logger::info(QStringLiteral("Register deleted: id=%1").arg(registerId));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
-QHttpServerResponse ApiServer::handleWriteRegister(const QHttpServerRequest &request,
-                                                   const QString &deviceId)
+QHttpServerResponse ApiServer::handleCheckUnifiedId(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const QUrlQuery query(request.query());
+    bool ok = false;
+    const int unifiedId = query.queryItemValue(QStringLiteral("id")).toInt(&ok);
+
+    if (!ok || unifiedId < 0) {
+        QJsonObject err;
+        err["error"] = QStringLiteral("id query parameter is required and must be a non-negative integer");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    bool found = false;
+    m_deviceList->findByUnifiedId(unifiedId, found);
+
+    QJsonObject resp;
+    resp["available"] = !found;
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handleWriteRegister(const QHttpServerRequest &request,
+                                                   const QString &registerId)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
     const QJsonObject body = doc.object();
-    const QString typeStr  = body.value("type").toString().trimmed();
-    if (!body.contains("address") || typeStr.isEmpty() || !body.contains("rawValues")) {
+    if (!body.contains("rawValues")) {
         QJsonObject err;
-        err["error"] = QStringLiteral("address, type, rawValues are required");
+        err["error"] = QStringLiteral("rawValues is required");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    const int devId   = deviceId.toInt();
-    const int address = body.value("address").toInt();
-    const Model::RegisterType type = Model::registerTypeFromString(typeStr);
-
-    // 실제 RegisterField를 조회해 readOnly 여부를 확인한다.
-    Model::DeviceInfo device;
-    try {
-        device = m_deviceList->get(devId);
-    } catch (const std::out_of_range &) {
+    bool found = false;
+    const Model::RegisterConfig reg = m_deviceList->findByRegisterId(registerId.toInt(), found);
+    if (!found) {
         QJsonObject err;
-        err["error"] = QStringLiteral("Device not found");
+        err["error"] = QStringLiteral("Register not found: id=%1").arg(registerId);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
     }
 
-    const auto it = std::find_if(device.registers.begin(), device.registers.end(),
-                                 [&](const Model::RegisterField &f) {
-                                     return f.address == address && f.type == type;
-                                 });
-    if (it == device.registers.end()) {
+    if (reg.readOnly) {
         QJsonObject err;
-        err["error"] = QStringLiteral("Register not found: addr=%1 type=%2").arg(address).arg(typeStr);
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
-    }
-
-    if (it->readOnly) {
-        QJsonObject err;
-        err["error"] = QStringLiteral("Register is read-only: %1").arg(it->tagName);
+        err["error"] = QStringLiteral("Register is read-only: %1").arg(reg.tagName);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
@@ -1056,19 +1102,17 @@ QHttpServerResponse ApiServer::handleWriteRegister(const QHttpServerRequest &req
         rawValues.append(static_cast<quint16>(v.toInt()));
 
     Model::WriteRequest req;
-    req.field     = *it;
+    req.config    = reg;
     req.rawValues = rawValues;
 
-    if (req.field.type == Model::RegisterType::Coil ||
-        req.field.type == Model::RegisterType::BitRegister) {
+    if (reg.type == Model::RegisterType::Coil) {
         for (quint16 v : rawValues)
             req.coilValues.append(v != 0);
     }
 
-    m_deviceList->enqueueWrite(devId, std::move(req));
+    m_deviceList->enqueueWrite(reg.deviceId, std::move(req));
 
-    Util::Logger::info(QStringLiteral("Write enqueued: device=%1 addr=%2 type=%3")
-                           .arg(devId).arg(address).arg(typeStr));
+    Util::Logger::info(QStringLiteral("Write enqueued: id=%1 tag=%2").arg(registerId).arg(reg.tagName));
     QJsonObject resp;
     resp["ok"] = true;
     return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Accepted);
@@ -1079,14 +1123,12 @@ QHttpServerResponse ApiServer::handleWriteRegister(const QHttpServerRequest &req
 // ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request)){
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
-    }
+    if (auto err = requireAuth(request)) return std::move(*err);
 
-    const QList<Model::UnifiedRegister> regs = m_registerTable->unifiedRegisters();
+    const QList<Model::RegisterState> regs = m_registerTable->states();
     const QDateTime now = QDateTime::currentDateTimeUtc();
     QJsonArray arr;
-    for (const Model::UnifiedRegister &r : regs) {
+    for (const Model::RegisterState &r : regs) {
 
         //--------------------------------------------------------------------------//
         // For each register, determine the quality of the data based on the last 
@@ -1106,18 +1148,22 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
         }
 
         QJsonObject obj;
-        obj["id"]           = r.id;
-        obj["tagName"]      = r.tagName;
-        obj["displayName"]  = r.displayName;
-        obj["deviceId"]     = r.deviceId;
-        obj["address"]      = r.deviceAddress;
-        obj["sourceType"]   = Model::registerTypeToString(r.sourceType);
-        obj["unit"]         = r.unit;
+
+        obj["id"]           = r.config.unifiedRegisterId;
+        obj["registerId"]   = r.config.id;
+        obj["tagName"]      = r.config.tagName;
+        obj["displayName"]  = r.config.displayName;
+        obj["deviceId"]     = r.config.deviceId;
+        obj["address"]      = r.config.address;
+        obj["sourceType"]   = Model::registerTypeToString(r.config.type);
+        obj["unit"]         = r.config.unit;
         obj["scaledValue"]  = r.scaledValue;
-        obj["scale"]        = r.scale;
+        obj["minValue"]     = r.config.minValue;
+        obj["maxValue"]     = r.config.maxValue;
+        obj["scale"]        = r.config.scale;
         obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
-        obj["bitLabels"]    = r.bitLabels;
-        obj["readOnly"]     = r.readOnly;
+        obj["bitLabels"]    = r.config.bitLabels;
+        obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
         obj["outOfRange"]   = r.outOfRange;
         obj["quality"]      = Model::dataQualityToString(quality);
@@ -1142,8 +1188,7 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
 
 QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const QUrlQuery query(request.query());
 
@@ -1208,8 +1253,7 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
 // ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetUsers(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     QString error;
     const QList<Model::UserInfo> users = m_db->loadUsers(error);
@@ -1240,39 +1284,57 @@ QHttpServerResponse ApiServer::handleGetUsers(const QHttpServerRequest &request)
 
 QHttpServerResponse ApiServer::handlePostUser(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
 
     const QJsonObject body = doc.object();
+    
     const QString username    = body.value("username").toString().trimmed();
     const QString displayName = body.value("displayName").toString(username);
     const QString password    = body.value("password").toString();
     const QString roleStr     = body.value("role").toString().toLower().trimmed();
 
-    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
-
+    // Validate required fields
     if (username.isEmpty() || password.isEmpty()) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("username and password are required");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
+    // Validate password length
+    const int minPwLen = SystemConfig::config().loginSecurity.minPasswordLength;
     if (password.length() < minPwLen) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("password must be at least %1 characters").arg(minPwLen);
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
+    // Validate role
     if (roleStr != QLatin1String("user") &&
         roleStr != QLatin1String("manager") &&
         roleStr != QLatin1String("admin")) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("role is required: user | manager | admin");
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    // Check if username already exists
+    QString error;
+    bool exists = false;
+    m_db->loadUser(username, exists, error);
+
+    if (!error.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = error;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+    if (exists) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Username already exists: %1").arg(username);
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
     }
 
     Model::UserInfo user;
@@ -1284,10 +1346,14 @@ QHttpServerResponse ApiServer::handlePostUser(const QHttpServerRequest &request)
     user.role         = Model::userRoleFromString(roleStr);
     user.status       = Model::UserStatus::Active;
 
-    QString error;
+    // Insert the new user into the database
     if (!m_db->insertUser(user, error)) {
         Util::Logger::error(QStringLiteral("insertUser failed: %1").arg(error));
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::InternalServerError);
+
+        QJsonObject err;
+        err[QLatin1String("error")] = error;
+
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
     const QString resolvedRole = Model::userRoleToString(user.role);
@@ -1303,17 +1369,19 @@ QHttpServerResponse ApiServer::handlePostUser(const QHttpServerRequest &request)
 QHttpServerResponse ApiServer::handleDeleteUser(const QHttpServerRequest &request,
                                                 const QString &username)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     QString error;
     bool found = false;
+
     const Model::UserInfo user = m_db->loadUser(username, found, error);
+    
     if (!error.isEmpty()) {
         QJsonObject err;
         err["error"] = error;
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
+
     if (!found) {
         QJsonObject err;
         err["error"] = QStringLiteral("User not found: %1").arg(username);
@@ -1342,46 +1410,51 @@ QString ApiServer::sessionUsername(const QHttpServerRequest &request) const
 {
     const QString token = QString::fromUtf8(request.value("Authorization"))
                               .remove(QStringLiteral("Bearer ")).trimmed();
+
     QMutexLocker locker(&m_sessionMutex);
     return m_sessionUsers.value(token);
 }
 
-bool ApiServer::isLastAdmin(const QString &excludeUsername, QString &error) const
-{
-    const QList<Model::UserInfo> users = m_db->loadUsers(error);
-    if (!error.isEmpty()) return false;
-    int count = 0;
-    for (const auto &u : users) {
-        if (u.role == Model::UserRole::Admin &&
-            u.status == Model::UserStatus::Active &&
-            u.username != excludeUsername)
-            ++count;
-    }
-    return count == 0;
-}
 
 QHttpServerResponse ApiServer::handlePutUser(const QHttpServerRequest &request,
                                               const QString &username)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    if (!doc.isObject())
+
+    if (!doc.isObject()){
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+    }
 
     QString dbError;
     bool found = false;
     Model::UserInfo user = m_db->loadUser(username, found, dbError);
+    
     if (!dbError.isEmpty()) {
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+
+        return QHttpServerResponse(
+            err, 
+            QHttpServerResponse::StatusCode::InternalServerError);
     }
+
     if (!found) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("User not found: %1").arg(username);
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
+
+        return QHttpServerResponse(
+            err,
+            QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    // Prevent modification of the default admin account (ID 0)
+    if (user.id == 0) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Default admin account cannot be modified.");
+        
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
 
     const QJsonObject body = doc.object();
@@ -1391,6 +1464,7 @@ QHttpServerResponse ApiServer::handlePutUser(const QHttpServerRequest &request,
         if (dn.isEmpty()) {
             QJsonObject err;
             err[QLatin1String("error")] = QStringLiteral("displayName cannot be empty");
+
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
         user.displayName = dn;
@@ -1400,35 +1474,25 @@ QHttpServerResponse ApiServer::handlePutUser(const QHttpServerRequest &request,
         user.description = body.value(QLatin1String("description")).toString();
 
     if (body.contains(QLatin1String("role"))) {
-        if (user.id == 0) {
-            QJsonObject err;
-            err[QLatin1String("error")] = QStringLiteral("admin 계정의 role은 변경할 수 없습니다.");
-            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
-        }
         const QString roleStr = body.value(QLatin1String("role")).toString().toLower().trimmed();
+
         if (roleStr != QLatin1String("user") &&
             roleStr != QLatin1String("manager") &&
             roleStr != QLatin1String("admin")) {
             QJsonObject err;
             err[QLatin1String("error")] = QStringLiteral("role must be: user | manager | admin");
+
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
-        const Model::UserRole newRole = Model::userRoleFromString(roleStr);
-        if (user.role == Model::UserRole::Admin && newRole != Model::UserRole::Admin) {
-            QString checkError;
-            if (isLastAdmin(username, checkError)) {
-                QJsonObject err;
-                err[QLatin1String("error")] = QStringLiteral("Cannot demote the last active admin.");
-                return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
-            }
-        }
-        user.role = newRole;
+
+        user.role = Model::userRoleFromString(roleStr);
     }
 
     if (!m_db->updateUser(user, dbError)) {
         Util::Logger::error(QStringLiteral("updateUser failed: %1").arg(dbError));
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
@@ -1439,48 +1503,62 @@ QHttpServerResponse ApiServer::handlePutUser(const QHttpServerRequest &request,
     resp[QLatin1String("displayName")] = user.displayName;
     resp[QLatin1String("description")] = user.description;
     resp[QLatin1String("role")]        = Model::userRoleToString(user.role);
+
     return QHttpServerResponse(resp);
 }
 
 QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &request,
                                                       const QString &username)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    if (!doc.isObject())
+
+    if (!doc.isObject()){
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+    }
 
     const QJsonObject body = doc.object();
     const QString newPassword = body.value(QLatin1String("newPassword")).toString();
-    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
+    
+    // Validate new password length
+    const int minPwLen = SystemConfig::config().loginSecurity.minPasswordLength;
     if (newPassword.length() < minPwLen) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("newPassword must be at least %1 characters").arg(minPwLen);
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
     const QString caller = sessionUsername(request);
     QString dbError;
     bool found = false;
+    
     Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
-    if (!found || !dbError.isEmpty())
+    if (!found || !dbError.isEmpty()){
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    }
 
     found = false;
     Model::UserInfo user = m_db->loadUser(username, found, dbError);
+
     if (!dbError.isEmpty()) {
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
+
     if (!found) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("User not found: %1").arg(username);
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
     }
 
+    //--------------------------------------------------------------------------//
+    // Only allow the user themselves or an admin to change the password
+    //--------------------------------------------------------------------------//
     const bool isSelf  = (caller == username);
     const bool isAdmin = (callerInfo.role == Model::UserRole::Admin);
 
@@ -1511,22 +1589,25 @@ QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &r
 
     if (!m_db->updateUser(user, dbError)) {
         Util::Logger::error(QStringLiteral("updateUser (password) failed: %1").arg(dbError));
+        
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
     Util::Logger::info(QStringLiteral("Password changed: %1 by %2").arg(username, caller));
+
     QJsonObject resp;
     resp[QLatin1String("username")] = username;
+    
     return QHttpServerResponse(resp);
 }
 
 QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &request,
                                                     const QString &username)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -1534,50 +1615,52 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
 
     QString dbError;
     bool found = false;
+
     Model::UserInfo user = m_db->loadUser(username, found, dbError);
+
     if (!dbError.isEmpty()) {
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
     if (!found) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("User not found: %1").arg(username);
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::NotFound);
     }
 
+    //---------------------------------------------------------------------------//
+    // Prevent changing the status of the default admin account (ID 0)
+    //---------------------------------------------------------------------------//
     if (user.id == 0) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("admin 계정의 status는 변경할 수 없습니다.");
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
 
     const QString statusStr = doc.object()
                                   .value(QLatin1String("status")).toString().toLower().trimmed();
+
     if (statusStr != QLatin1String("active") &&
         statusStr != QLatin1String("locked") &&
         statusStr != QLatin1String("disabled")) {
+
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("status must be: active | locked | disabled");
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
     }
 
     const Model::UserStatus newStatus = Model::userStatusFromString(statusStr);
 
-    // active → locked/disabled 전환 시 마지막 admin 보호
-    if (newStatus != Model::UserStatus::Active && user.role == Model::UserRole::Admin) {
-        QString checkError;
-        if (isLastAdmin(username, checkError)) {
-            QJsonObject err;
-            err[QLatin1String("error")] =
-                QStringLiteral("Cannot change status of the last active admin.");
-            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
-        }
-    }
-
     user.status = newStatus;
 
-    // active 로 전환 시 실패 카운터 초기화
+    //---------------------------------------------------------------------------//
+    // Reset failedLoginCount to 0 when the status is set to Active
+    //---------------------------------------------------------------------------//
     if (newStatus == Model::UserStatus::Active)
         user.failedLoginCount = 0;
 
@@ -1585,21 +1668,22 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
         Util::Logger::error(QStringLiteral("updateUser (status) failed: %1").arg(dbError));
         QJsonObject err;
         err[QLatin1String("error")] = dbError;
+
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
     Util::Logger::info(QStringLiteral("User status changed: %1 → %2").arg(username, statusStr));
+
     QJsonObject resp;
     resp[QLatin1String("username")] = username;
     resp[QLatin1String("status")]   = statusStr;
+
     return QHttpServerResponse(resp);
 }
 
-
 QHttpServerResponse ApiServer::handleGetLoginHistory(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QUrlQuery query(request.query());
 
@@ -1638,13 +1722,13 @@ QHttpServerResponse ApiServer::handleGetLoginHistory(const QHttpServerRequest &r
     QJsonObject resp;
     resp[QLatin1String("history")] = arr;
     resp[QLatin1String("count")]   = arr.size();
+
     return QHttpServerResponse(resp);
 }
 
 QHttpServerResponse ApiServer::handleDeleteLoginHistory(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QUrlQuery query(request.query());
     const QString username = query.queryItemValue(QStringLiteral("username"));
@@ -1652,8 +1736,10 @@ QHttpServerResponse ApiServer::handleDeleteLoginHistory(const QHttpServerRequest
     QString error;
     if (!m_db->deleteLoginHistory(username, error)) {
         Util::Logger::error(QStringLiteral("deleteLoginHistory failed: %1").arg(error));
+
         QJsonObject err;
         err[QLatin1String("error")] = error;
+        
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
@@ -1668,10 +1754,9 @@ QHttpServerResponse ApiServer::handleDeleteLoginHistory(const QHttpServerRequest
 
 QHttpServerResponse ApiServer::handleGetSecurityPolicy(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
-    const LoginSecurityConfig &ls = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity;
+    const LoginSecurityConfig &ls = SystemConfig::config().loginSecurity;
 
     QJsonObject resp;
     resp[QLatin1String("maxFailedAttempts")]     = ls.maxFailedAttempts;
@@ -1683,8 +1768,7 @@ QHttpServerResponse ApiServer::handleGetSecurityPolicy(const QHttpServerRequest 
 
 QHttpServerResponse ApiServer::handlePutSecurityPolicy(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -1748,8 +1832,7 @@ QHttpServerResponse ApiServer::handlePutSecurityPolicy(const QHttpServerRequest 
 // ---------------------------------------------------------------------------
 QHttpServerResponse ApiServer::handleGetConfig(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
 
@@ -1799,8 +1882,7 @@ QHttpServerResponse ApiServer::handleGetConfig(const QHttpServerRequest &request
 
 QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const AppConfig defaults = factoryDefaultConfig();
 
@@ -1868,8 +1950,7 @@ QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handlePutConfigNetwork(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -1915,8 +1996,7 @@ QHttpServerResponse ApiServer::handlePutConfigNetwork(const QHttpServerRequest &
 
 QHttpServerResponse ApiServer::handlePutConfigSerial(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -1946,8 +2026,7 @@ QHttpServerResponse ApiServer::handlePutConfigSerial(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handlePutConfigSystem(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -1975,8 +2054,7 @@ QHttpServerResponse ApiServer::handlePutConfigSystem(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handlePutConfigModbusServer(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
     if (!doc.isObject())
@@ -2024,8 +2102,7 @@ QHttpServerResponse ApiServer::handlePutConfigModbusServer(const QHttpServerRequ
 
 QHttpServerResponse ApiServer::handleGetSystemInfo(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     struct statvfs st;
     if (::statvfs("/", &st) != 0) {
@@ -2083,8 +2160,7 @@ QHttpServerResponse ApiServer::handleGetSystemInfo(const QHttpServerRequest &req
 
 QHttpServerResponse ApiServer::handlePostRestart(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
     Util::Logger::info(QStringLiteral("System restart requested via API."));
 
@@ -2131,45 +2207,57 @@ bool ApiServer::syncDeleteDevice(int id, QString &error)
     return true;
 }
 
-bool ApiServer::syncAddRegister(int deviceId, const Model::RegisterField &field, QString &error)
+bool ApiServer::syncAddRegister(int deviceId, Model::RegisterConfig &config, QString &error)
 {
-    if (!m_db->insertRegister(deviceId, field, error))
+    if (!m_db->insertRegister(deviceId, config, error))
         return false;
 
-    const QList<Model::RegisterField> fields = m_db->loadRegisters(deviceId, error);
+    const QList<Model::RegisterConfig> configs = m_db->loadRegisters(deviceId, error);
     if (!error.isEmpty()) return false;
 
     Model::DeviceInfo device = m_deviceList->get(deviceId);
-    device.registers = fields;
+    device.registers = configs;
     m_deviceList->update(device);
+
     return true;
 }
 
-bool ApiServer::syncUpdateRegister(int deviceId, const Model::RegisterField &field, QString &error)
+bool ApiServer::syncUpdateRegister(Model::RegisterConfig config, QString &error)
 {
-    if (!m_db->updateRegister(deviceId, field, error))
+    if (!m_db->updateRegister(config, error))
         return false;
 
-    const QList<Model::RegisterField> fields = m_db->loadRegisters(deviceId, error);
+    const QList<Model::RegisterConfig> configs = m_db->loadRegisters(config.deviceId, error);
     if (!error.isEmpty()) return false;
 
-    Model::DeviceInfo device = m_deviceList->get(deviceId);
-    device.registers = fields;
+    Model::DeviceInfo device = m_deviceList->get(config.deviceId);
+    device.registers = configs;
     m_deviceList->update(device);
+    
     return true;
 }
 
-bool ApiServer::syncDeleteRegister(int deviceId, int registerId, QString &error)
+bool ApiServer::syncDeleteRegister(int registerId, QString &error)
 {
-    if (!m_db->deleteRegister(deviceId, registerId, error))
+    bool found = false;
+    const Model::RegisterConfig reg = m_deviceList->findByRegisterId(registerId, found);
+
+    if (!found) {
+        error = QStringLiteral("Register not found: id=%1").arg(registerId);
+        return false;
+    }
+    const int deviceId = reg.deviceId;
+
+    if (!m_db->deleteRegister(registerId, error))
         return false;
 
-    const QList<Model::RegisterField> fields = m_db->loadRegisters(deviceId, error);
+    const QList<Model::RegisterConfig> configs = m_db->loadRegisters(deviceId, error);
     if (!error.isEmpty()) return false;
 
     Model::DeviceInfo device = m_deviceList->get(deviceId);
-    device.registers = fields;
+    device.registers = configs;
     m_deviceList->update(device);
+    
     return true;
 }
 
@@ -2179,22 +2267,9 @@ bool ApiServer::syncDeleteRegister(int deviceId, int registerId, QString &error)
 
 QHttpServerResponse ApiServer::handleGetBackup(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::AdminOnly)) return std::move(*err);
 
     const QString caller = sessionUsername(request);
-    QString dbError;
-    bool found = false;
-    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
-
-    //--------------------------------------------------------//
-    // Only Admin role can create backup
-    //--------------------------------------------------------//
-    if (!found || callerInfo.role != Model::UserRole::Admin) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("Admin role required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
-    }
 
     QString backupError;
     QByteArray zipData = Maintenance::BackupManager::create(m_db, backupError);
@@ -2223,18 +2298,9 @@ QHttpServerResponse ApiServer::handleGetBackup(const QHttpServerRequest &request
 
 QHttpServerResponse ApiServer::handleRestoreValidate(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::AdminOnly)) return std::move(*err);
 
     const QString caller = sessionUsername(request);
-    QString dbError;
-    bool found = false;
-    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
-    if (!found || callerInfo.role != Model::UserRole::Admin) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("Admin role required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
-    }
 
     const QByteArray zipData = request.body();
     if (zipData.isEmpty()) {
@@ -2293,18 +2359,9 @@ QHttpServerResponse ApiServer::handleRestoreValidate(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handleRestoreApply(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::AdminOnly)) return std::move(*err);
 
     const QString caller = sessionUsername(request);
-    QString dbError;
-    bool found = false;
-    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbError);
-    if (!found || callerInfo.role != Model::UserRole::Admin) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("Admin role required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
-    }
 
     QHttpServerResponse pollingCheck(QHttpServerResponse::StatusCode::Ok);
     if (rejectIfPolling(pollingCheck))
@@ -2356,23 +2413,9 @@ QHttpServerResponse ApiServer::handleRestoreApply(const QHttpServerRequest &requ
 
 QHttpServerResponse ApiServer::handlePostFactoryReset(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request, RequiredRole::AdminOnly)) return std::move(*err);
 
     const QString caller = sessionUsername(request);
-
-    QString dbErr;
-    bool found = false;
-    
-    //-----------------------------------------------------------------------//
-    // Check if the caller has Admin role
-    //-----------------------------------------------------------------------//
-    const Model::UserInfo callerInfo = m_db->loadUser(caller, found, dbErr);
-    if (!found || callerInfo.role != Model::UserRole::Admin) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("Admin role required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
-    }
 
     //-----------------------------------------------------------------------//
     // Polling must be stopped before factory reset
@@ -2423,21 +2466,10 @@ QHttpServerResponse ApiServer::handlePostFactoryReset(const QHttpServerRequest &
 
 QHttpServerResponse ApiServer::handleGetSystemResources(const QHttpServerRequest &request)
 {
-    if (!isAuthenticated(request))
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    if (auto err = requireAuth(request)) return std::move(*err);
 
     const Util::SystemResources res = m_systemMonitor->resources();
 
-    qDebug() << "System Resources:"
-             << "CPU" << res.cpuUsagePercent << "%"
-             << "LoadAvg" << res.loadAvg1 << res.loadAvg5 << res.loadAvg15
-             << "Temp" << res.cpuTempCelsius << "°C"
-             << "Memory" << res.memUsedKb << "/" << res.memTotalKb
-             << "Swap" << res.swapUsedKb << "/" << res.swapTotalKb
-             << "Disks" << res.disks.size()
-             << "Network" << res.network.size()
-             << "Uptime" << res.uptimeSeconds;
-             
     QJsonObject cpu;
     cpu[QLatin1String("usagePercent")] = res.cpuUsagePercent;
     cpu[QLatin1String("loadAvg1")]     = res.loadAvg1;

@@ -10,50 +10,82 @@ DataCollector::DataCollector(const Model::DeviceInfo &device,
     , m_deviceList(std::move(deviceList))
     , m_executor(std::make_unique<Comm::RegisterExecutor>(
           std::move(client), m_device.connection.defaultByteOrder))
+    , m_batches(buildBatches())
 {}
 
 bool DataCollector::ensureConnected(QString &error)
 {
-    if (!m_executor->isConnected())
+    if (!m_executor->isConnected()){
         return m_executor->connect(error);
+    }
+
     return true;
 }
 
-bool DataCollector::collectField(const Model::RegisterField &field,
+bool DataCollector::collectField(const Model::RegisterConfig &config,
                                  QVector<quint16> &registerValues,
                                  QVector<bool> &coilValues,
                                  QString &error)
 {
-    if (!ensureConnected(error))
+    if (!ensureConnected(error)){
         return false;
-    return m_executor->readField(field, registerValues, coilValues, error);
+    }
+
+    return m_executor->readField(config,
+                                 registerValues,
+                                 coilValues,
+                                 error);
 }
 
 QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
 {
+    //-----------------------------------------------------------//
+    // Think about the following example:
+    // Registers: [0,1,2,3,4,5,10,100,200,7,6]
+    //
+    // Just Sort indices by (type, address) so contiguous registers are 
+    // always merged
+    // keep original order of the registers as inserted into the DB.
+    //-----------------------------------------------------------//
+    QList<int> indices;
+    indices.reserve(m_device.registers.size());
+    for (int i = 0; i < m_device.registers.size(); ++i){
+        indices.append(i);
+    }
+        
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+        const auto &ra = m_device.registers.at(a);
+        const auto &rb = m_device.registers.at(b);
+        
+        if (ra.type != rb.type){
+            return static_cast<int>(ra.type) < static_cast<int>(rb.type);
+        }
+        return ra.address < rb.address;
+    });
+
     QList<RegisterBatch> batches;
 
-    for (int i = 0; i < m_device.registers.size(); ++i) {
-        const Model::RegisterField &field = m_device.registers.at(i);
+    for (const int i : indices) {
+        const Model::RegisterConfig &config = m_device.registers.at(i);
 
         bool canMerge = false;
         if (!batches.isEmpty()) {
             const RegisterBatch &last = batches.last();
-            canMerge = (last.type == field.type)
-                    && (field.address == last.startAddress + last.totalLength)
-                    && (last.totalLength + field.length <= Comm::RegisterExecutor::MAX_READ_QUANTITY);
+            canMerge = (last.type == config.type)
+                    && (config.address == last.startAddress + last.totalLength)
+                    && (last.totalLength + config.length <= Comm::RegisterExecutor::MAX_READ_QUANTITY);
         }
 
         if (canMerge) {
             RegisterBatch &last = batches.last();
-            last.slices.append({i, last.totalLength, field.length});
-            last.totalLength += field.length;
+            last.slices.append({i, last.totalLength, config.length});
+            last.totalLength += config.length;
         } else {
             RegisterBatch batch;
-            batch.startAddress = field.address;
-            batch.totalLength  = field.length;
-            batch.type         = field.type;
-            batch.slices.append({i, 0, field.length});
+            batch.startAddress = config.address;
+            batch.totalLength  = config.length;
+            batch.type         = config.type;
+            batch.slices.append({i, 0, config.length});
             batches.append(batch);
         }
     }
@@ -61,6 +93,10 @@ QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
     return batches;
 }
 
+
+// ---------------------------------------------------------------------------//
+// Collect all fields for the device at once, returning a list of FieldResult objects
+// ---------------------------------------------------------------------------//
 QList<DataCollector::FieldResult> DataCollector::collectAllFields()
 {
     const int count = m_device.registers.size();
@@ -72,7 +108,7 @@ QList<DataCollector::FieldResult> DataCollector::collectAllFields()
         return results;
     }
 
-    for (const RegisterBatch &batch : buildBatches()) {
+    for (const RegisterBatch &batch : m_batches) {
         QVector<quint16> rawWords;
         QVector<bool>    rawBits;
         QString error;
@@ -93,12 +129,16 @@ QList<DataCollector::FieldResult> DataCollector::collectAllFields()
             }
             r.ok = true;
 
-            if (!rawBits.isEmpty()) {
+            switch (batch.type) {
+            case Model::RegisterType::Coil:
+            case Model::RegisterType::DiscreteInput:
                 r.coilValues = rawBits.mid(slice.offset, slice.length);
-            } else {
-                const QVector<quint16> sliceVals = rawWords.mid(slice.offset, slice.length);
+                break;
+            default:
                 r.registerValues = m_executor->applyFieldByteOrder(
-                    sliceVals, m_device.registers.at(slice.fieldIndex));
+                    rawWords.mid(slice.offset, slice.length),
+                    m_device.registers.at(slice.fieldIndex));
+                break;
             }
         }
     }
@@ -106,27 +146,37 @@ QList<DataCollector::FieldResult> DataCollector::collectAllFields()
     return results;
 }
 
+
+// ---------------------------------------------------------------------------//
+// Flush any pending write requests for this device
+// ---------------------------------------------------------------------------//
 void DataCollector::flushWrites()
 {
     if (!m_deviceList) return;
 
     for (const Model::WriteRequest &req : m_deviceList->takeWrites(m_device.id)) {
         QString error;
+
         if (!m_executor->isConnected() && !m_executor->connect(error)) {
             qWarning("flushWrites: connect failed [device %d]: %s",
                      m_device.id, qPrintable(error));
             continue;
         }
-        if (!m_executor->writeField(req.field, req.rawValues, req.coilValues, error)) {
+
+        if (!m_executor->writeField(req.config, req.rawValues, req.coilValues, error)) {
             if (req.retryCount > 0) {
                 Model::WriteRequest retry = req;
                 retry.retryCount--;
+
+                //-------------------------------------------//
+                // Re-enqueue the write request for retry
+                //-------------------------------------------//
                 m_deviceList->enqueueWrite(m_device.id, std::move(retry));
                 qWarning("flushWrites: write failed, retrying (%d left) [device %d, addr %d]: %s",
-                         req.retryCount - 1, m_device.id, req.field.address, qPrintable(error));
+                         req.retryCount - 1, m_device.id, req.config.address, qPrintable(error));
             } else {
                 qWarning("flushWrites: write failed, no retries left [device %d, addr %d]: %s",
-                         m_device.id, req.field.address, qPrintable(error));
+                         m_device.id, req.config.address, qPrintable(error));
             }
         }
     }

@@ -16,6 +16,7 @@ bool RegisterExecutor::connect(QString &error)
         error = QStringLiteral("Device client is not initialized");
         return false;
     }
+
     if (!m_client->connect()) {
         error = m_client->errorString();
         return false;
@@ -35,7 +36,7 @@ bool RegisterExecutor::isConnected() const
     return m_client && m_client->isConnected();
 }
 
-bool RegisterExecutor::readField(const Model::RegisterField &field,
+bool RegisterExecutor::readField(const Model::RegisterConfig &config,
                                  QVector<quint16> &registerValues,
                                  QVector<bool> &coilValues,
                                  QString &error)
@@ -45,28 +46,26 @@ bool RegisterExecutor::readField(const Model::RegisterField &field,
         return false;
     }
 
-    switch (field.type) {
+    switch (config.type) {
     case Model::RegisterType::Coil:
     case Model::RegisterType::DiscreteInput:
-    case Model::RegisterType::BitRegister:
-        return m_client->readBits(field.address, field.length, coilValues, error);
+        return m_client->readBits(config.address, config.length, coilValues, error);
 
     case Model::RegisterType::HoldingRegister:
     case Model::RegisterType::InputRegister:
-    case Model::RegisterType::WordRegister:
-        if (!m_client->readWords(field.address, field.length, registerValues, error)) {
+        if (!m_client->readWords(config.address, config.length, registerValues, error)) {
             return false;
         }
-        registerValues = applyByteOrder(registerValues, effectiveByteOrder(field));
+        registerValues = applyByteOrder(registerValues, effectiveByteOrder(config));
         return true;
 
     default:
-        error = QStringLiteral("Unsupported register type: %1").arg(Model::registerTypeToString(field.type));
+        error = QStringLiteral("Unsupported register type: %1").arg(Model::registerTypeToString(config.type));
         return false;
     }
 }
 
-bool RegisterExecutor::writeField(const Model::RegisterField &field,
+bool RegisterExecutor::writeField(const Model::RegisterConfig &config,
                                   const QVector<quint16> &registerValues,
                                   const QVector<bool> &coilValues,
                                   QString &error)
@@ -76,33 +75,37 @@ bool RegisterExecutor::writeField(const Model::RegisterField &field,
         return false;
     }
 
-    if (field.readOnly) {
-        error = QStringLiteral("Field is read-only: %1").arg(field.tagName);
+    if (config.readOnly) {
+        error = QStringLiteral("Register is read-only: %1").arg(config.tagName);
         return false;
     }
 
-    switch (field.type) {
-    case Model::RegisterType::Coil:
-    case Model::RegisterType::BitRegister: {
-        if (coilValues.size() != field.length) {
-            error = QStringLiteral("Bit value count does not match field length for %1").arg(field.tagName);
+    //------------------------------------------------------------------------//
+    // Validate the length of the provided values against the register length
+    //
+    // Modbus protocol does not support writing to InputRegisters or DiscreteInputs, 
+    // so we only handle Coils and HoldingRegisters here.
+    //------------------------------------------------------------------------//
+    switch (config.type) {
+    case Model::RegisterType::Coil:{
+        if (coilValues.size() != config.length) {
+            error = QStringLiteral("Bit value count does not match register length for %1").arg(config.tagName);
             return false;
         }
-        return m_client->writeBits(field.address, coilValues, error);
+        return m_client->writeBits(config.address, coilValues, error);
     }
 
-    case Model::RegisterType::HoldingRegister:
-    case Model::RegisterType::WordRegister: {
-        if (registerValues.size() != field.length) {
-            error = QStringLiteral("Word value count does not match field length for %1").arg(field.tagName);
+    case Model::RegisterType::HoldingRegister:{
+        if (registerValues.size() != config.length) {
+            error = QStringLiteral("Word value count does not match register length for %1").arg(config.tagName);
             return false;
         }
-        const QVector<quint16> ordered = applyByteOrder(registerValues, effectiveByteOrder(field));
-        return m_client->writeWords(field.address, ordered, error);
+        const QVector<quint16> ordered = applyByteOrder(registerValues, effectiveByteOrder(config));
+        return m_client->writeWords(config.address, ordered, error);
     }
 
     default:
-        error = QStringLiteral("Unsupported write target: %1").arg(Model::registerTypeToString(field.type));
+        error = QStringLiteral("Unsupported write target: %1").arg(Model::registerTypeToString(config.type));
         return false;
     }
 }
@@ -122,12 +125,10 @@ bool RegisterExecutor::readBatch(int startAddress,
     switch (type) {
     case Model::RegisterType::Coil:
     case Model::RegisterType::DiscreteInput:
-    case Model::RegisterType::BitRegister:
         return m_client->readBits(startAddress, totalLength, coilValues, error);
 
     case Model::RegisterType::HoldingRegister:
     case Model::RegisterType::InputRegister:
-    case Model::RegisterType::WordRegister:
         return m_client->readWords(startAddress, totalLength, registerValues, error);
 
     default:
@@ -137,9 +138,9 @@ bool RegisterExecutor::readBatch(int startAddress,
 }
 
 QVector<quint16> RegisterExecutor::applyFieldByteOrder(const QVector<quint16> &values,
-                                                        const Model::RegisterField &field) const
+                                                        const Model::RegisterConfig &config) const
 {
-    return applyByteOrder(values, effectiveByteOrder(field));
+    return applyByteOrder(values, effectiveByteOrder(config));
 }
 
 QVector<quint16> RegisterExecutor::applyByteOrder(const QVector<quint16> &values,
@@ -157,10 +158,10 @@ QVector<quint16> RegisterExecutor::applyByteOrder(const QVector<quint16> &values
     return ordered;
 }
 
-Model::ByteOrder RegisterExecutor::effectiveByteOrder(const Model::RegisterField &field) const
+Model::ByteOrder RegisterExecutor::effectiveByteOrder(const Model::RegisterConfig &config) const
 {
-    if (field.byteOrder != Model::ByteOrder::Default) {
-        return field.byteOrder;
+    if (config.byteOrder != Model::ByteOrder::Default) {
+        return config.byteOrder;
     }
     return m_defaultByteOrder;
 }

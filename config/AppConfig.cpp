@@ -63,10 +63,9 @@ bool factoryReset(const QString &filePath, QString &error)
     return saveConfig(filePath, factoryDefaultConfig(), error);
 }
 
-// ---------------------------------------------------------------------------
-// load
-// ---------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------------//
+// load from file
+// ---------------------------------------------------------------------------//
 AppConfig loadConfig(const QString &filePath)
 {
     AppConfig config;
@@ -87,13 +86,17 @@ AppConfig loadConfig(const QString &filePath)
 
     const QJsonObject root = doc.object();
 
-    // network
+    //-------------------------------------------------------------//
+    // Load ethernet network
+    //-------------------------------------------------------------//
     const QJsonArray ifaces =
         root.value(QLatin1String("network")).toObject()
             .value(QLatin1String("interfaces")).toArray();
+
     for (const QJsonValue &v : ifaces) {
         const QJsonObject obj = v.toObject();
         NetInterfaceConfig iface;
+
         iface.name      = obj.value(QLatin1String("name")).toString();
         iface.role      = obj.value(QLatin1String("role")).toString();
         iface.enabled   = obj.value(QLatin1String("enabled")).toBool(true);
@@ -102,11 +105,15 @@ AppConfig loadConfig(const QString &filePath)
         iface.netmask   = obj.value(QLatin1String("netmask")).toString();
         iface.gateway   = obj.value(QLatin1String("gateway")).toString();
         iface.dns       = obj.value(QLatin1String("dns")).toString();
+
         config.networkInterfaces.append(iface);
     }
 
-    // serial
+    //-------------------------------------------------------------//
+    // Load Serial network
+    //-------------------------------------------------------------//
     const QJsonObject serial = root.value(QLatin1String("serial")).toObject();
+
     config.rs485.device   = serial.value(QLatin1String("device")).toString(QStringLiteral("/dev/ttymxc1"));
     config.rs485.baudRate = serial.value(QLatin1String("baudRate")).toInt(9600);
     config.rs485.dataBits = serial.value(QLatin1String("dataBits")).toInt(8);
@@ -135,9 +142,8 @@ AppConfig loadConfig(const QString &filePath)
 }
 
 // ---------------------------------------------------------------------------
-// save
+// Save Config to file.
 // ---------------------------------------------------------------------------
-
 bool saveConfig(const QString &filePath, const AppConfig &config, QString &error)
 {
     Util::Logger::info(QStringLiteral("Updated system config file"));
@@ -145,6 +151,7 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     QJsonArray ifaces;
     for (const NetInterfaceConfig &iface : config.networkInterfaces) {
         QJsonObject obj;
+
         obj[QLatin1String("name")]      = iface.name;
         obj[QLatin1String("role")]      = iface.role;
         obj[QLatin1String("enabled")]   = iface.enabled;
@@ -153,6 +160,7 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
         obj[QLatin1String("netmask")]   = iface.netmask;
         obj[QLatin1String("gateway")]   = iface.gateway;
         obj[QLatin1String("dns")]       = iface.dns;
+
         ifaces.append(obj);
     }
 

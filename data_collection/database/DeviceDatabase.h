@@ -11,9 +11,9 @@ namespace Database{
 
 enum class LoginResult {
     Success,
-    InvalidCredentials,  // 비밀번호 오류 (계정 존재 여부 노출 방지 목적으로 동일 응답)
-    AccountDisabled,     // 관리자 비활성화
-    AccountLocked        // 연속 실패로 임시 잠금
+    InvalidCredentials,  // Username or password incorrect
+    AccountDisabled,     // User account is disabled
+    AccountLocked        // User account is locked due to too many failed login attempts
 };
 
 class DeviceDatabase
@@ -35,10 +35,10 @@ public:
     bool deleteDevice(int deviceId, QString &error);
 
     // Register
-    QList<Model::RegisterField> loadRegisters(int deviceId, QString &error) const;
-    bool insertRegister(int deviceId, const Model::RegisterField &field, QString &error);
-    bool updateRegister(int deviceId, const Model::RegisterField &field, QString &error);
-    bool deleteRegister(int deviceId, int registerId, QString &error);
+    QList<Model::RegisterConfig> loadRegisters(int deviceId, QString &error) const;
+    bool insertRegister(int deviceId, Model::RegisterConfig &config, QString &error);
+    bool updateRegister(Model::RegisterConfig &config, QString &error);
+    bool deleteRegister(int registerId, QString &error);
 
     // User
     QList<Model::UserInfo> loadUsers(QString &error) const;
@@ -71,10 +71,6 @@ public:
 
     // Factory Reset
     bool factoryReset(QString &error);
-
-    // Insert Sample Data
-    bool insertRefrigerationSampleDevices(QString &error);
-    bool insertSampleRegistersForDevice(int deviceId, Model::DeviceConnection::Protocol protocol, QString &error);
 
 private:
 

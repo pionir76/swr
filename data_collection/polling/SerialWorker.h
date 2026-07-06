@@ -29,7 +29,7 @@ protected:
 
 private:
     QList<Model::DeviceInfo> m_devices;
-    std::shared_ptr<Store::RegisterTable> m_table;
+    std::shared_ptr<Store::RegisterTable> m_registerTable;
     std::shared_ptr<Store::DeviceList> m_deviceList;
     std::atomic<bool> m_running{false};
 };

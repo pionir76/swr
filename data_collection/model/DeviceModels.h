@@ -8,6 +8,14 @@
 namespace DataCollection {
 namespace Model {
 
+//-----------------------------------------------------------//
+// range of unifiedRegisterId 
+// auto assigned: 1 ~ kAutoUnifiedIdMax
+// manually assigned: kManualUnifiedIdMin ~ 4999
+//-----------------------------------------------------------//
+static constexpr int kAutoUnifiedIdMax   = 4999;
+static constexpr int kManualUnifiedIdMin = 5000;
+
 enum class ByteOrder {
     Default,
     BigEndian,
@@ -16,45 +24,39 @@ enum class ByteOrder {
 
 enum class RegisterType {
     Unknown,
-
-    // Modbus-specific types
     Coil,           // FC01 — RW bits
     DiscreteInput,  // FC02 — RO bits
     HoldingRegister,// FC03 — RW words
     InputRegister,  // FC04 — RO words
-
-    // Generic types for non-Modbus protocols (PcLink, etc.)
-    WordRegister,   // RW word register
-    BitRegister     // RW bit register
 };
 
 
-struct RegisterField {
-    int id = -1;
+struct RegisterConfig {
+    int             id = -1;
+    int             deviceId = -1;
 
-    QString tagName;        // Real Name (temp pv)
-    QString displayName;    // Display Name (cool water temp)
+    QString         tagName;
+    QString         displayName;
 
-    int address = 0;
-    RegisterType type = RegisterType::Unknown;
-    bool readOnly = false;
-    int length = 1;
-    int unifiedRegisterId = -1;
-    QString unit;
+    int             address = 0;
+    RegisterType    type = RegisterType::Unknown;
+    bool            readOnly = false;
+    int             length = 1;
+    int             unifiedRegisterId = -1;
+    QString         unit;
 
-    double scale = 1.0;
-    bool isSigned = false;
-    QString bitLabels;  // JSON {"0":"label0","1":"label1"} — empty = Unused
-    double minValue = std::numeric_limits<double>::lowest();
-    double maxValue = std::numeric_limits<double>::max();
-    ByteOrder byteOrder = ByteOrder::Default;
+    double          scale = 1.0;
+    bool            isSigned = false;
+    QString         bitLabels;  // JSON {"0":"label0","1":"label1"} — empty = Unused
+    double          minValue = std::numeric_limits<double>::lowest();
+    double          maxValue = std::numeric_limits<double>::max();
+    ByteOrder       byteOrder = ByteOrder::Default;
 };
 
 struct PollingConfig {
     int intervalMs = 1000;
     int retryCount = 3;
 };
-
 
 struct DeviceConnection {
     // Connection Type
@@ -94,7 +96,7 @@ struct DeviceInfo {
     QString displayName;
 
     DeviceConnection connection;
-    QList<RegisterField> registers;
+    QList<RegisterConfig> registers;
     PollingConfig polling;
 
     // Runtime status, Updated By Polling Worker.
@@ -145,7 +147,7 @@ struct UserInfo
 };
 
 struct WriteRequest {
-    RegisterField field;
+    RegisterConfig config;
     QVector<quint16> rawValues;
     QVector<bool> coilValues;
     int retryCount = 3;
@@ -254,8 +256,6 @@ inline QString registerTypeToString(RegisterType type)
     case RegisterType::DiscreteInput:   return QStringLiteral("discrete_input");
     case RegisterType::HoldingRegister: return QStringLiteral("holding_register");
     case RegisterType::InputRegister:   return QStringLiteral("input_register");
-    case RegisterType::WordRegister:    return QStringLiteral("word_register");
-    case RegisterType::BitRegister:     return QStringLiteral("bit_register");
     default:                            return QStringLiteral("unknown");
     }
 }
@@ -267,15 +267,13 @@ inline RegisterType registerTypeFromString(const QString &s)
     if (n == QLatin1String("discreteinput"))   return RegisterType::DiscreteInput;
     if (n == QLatin1String("holdingregister")) return RegisterType::HoldingRegister;
     if (n == QLatin1String("inputregister"))   return RegisterType::InputRegister;
-    if (n == QLatin1String("wordregister"))    return RegisterType::WordRegister;
-    if (n == QLatin1String("bitregister"))     return RegisterType::BitRegister;
     return RegisterType::Unknown;
 }
 
 } // namespace Model
 } // namespace DataCollection
 
-Q_DECLARE_METATYPE(DataCollection::Model::RegisterField)
+Q_DECLARE_METATYPE(DataCollection::Model::RegisterConfig)
 Q_DECLARE_METATYPE(DataCollection::Model::PollingConfig)
 Q_DECLARE_METATYPE(DataCollection::Model::DeviceConnection)
 Q_DECLARE_METATYPE(DataCollection::Model::DeviceInfo)

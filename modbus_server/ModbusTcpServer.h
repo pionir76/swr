@@ -14,7 +14,7 @@
 //   비트형(Coil / DiscreteInput / BitRegister) 값 변환 규칙:
 //     false → 0x0000,  true → 0x0001  (16비트 워드로 표현)
 //
-//   쓰기 가능 여부는 RegisterField.readOnly 플래그로 결정한다.
+//   쓰기 가능 여부는 RegisterConfig.readOnly 플래그로 결정한다.
 //   원본 장비의 InputRegister(FC04, 원래 RO)든 사용자가 readOnly 설정한
 //   레지스터든 동일하게 쓰기 요청 시 Modbus Exception Code 0x01로 거부한다.
 //
@@ -27,8 +27,8 @@
 //
 // [쓰기 경로]
 //   외부 마스터 FC06/FC16 요청 (Holding Register 쓰기만 허용)
-//     → RegisterAddressMap으로 unifiedId → RegisterField 조회
-//     → RegisterField.readOnly == true → Exception Code 0x01 응답
+//     → RegisterAddressMap으로 unifiedId → RegisterConfig 조회
+//     → RegisterConfig.readOnly == true → Exception Code 0x01 응답
 //     → PollingManager::requestWrite()로 실제 장비에 전파
 //
 // [쓰레드 모델]

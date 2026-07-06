@@ -15,7 +15,7 @@
 //
 // [onDataWritten()]
 //   - address → RegisterAddressMap::unifiedIdFromAddress() → unifiedId
-//   - DeviceList에서 해당 unifiedId의 RegisterField 조회
+//   - DeviceList에서 해당 unifiedId의 RegisterConfig 조회
 //   - readOnly 체크 → 위반 시 Modbus Exception 응답 (QModbusTcpServer API 확인 필요)
 //   - PollingManager::requestWrite() 호출로 실제 장비에 전파
 //

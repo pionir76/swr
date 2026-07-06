@@ -11,13 +11,13 @@
 namespace DataCollection {
 namespace Polling {
 
-SerialWorker::SerialWorker(QList<Model::DeviceInfo> devices,
+SerialWorker::SerialWorker(QList<Model::DeviceInfo> m_devices,
                            std::shared_ptr<Store::RegisterTable> table,
                            std::shared_ptr<Store::DeviceList> deviceList,
                            QObject *parent)
     : QThread(parent)
-    , m_devices(std::move(devices))
-    , m_table(std::move(table))
+    , m_devices(std::move(m_devices))
+    , m_registerTable(std::move(table))
     , m_deviceList(std::move(deviceList))
 {
 }
@@ -31,8 +31,11 @@ void SerialWorker::stop()
 void SerialWorker::run()
 {
     m_running = true;
-
     QString openError;
+
+    //-----------------------------------------------------------//
+    // Open the serial bus for all devices to share
+    //-----------------------------------------------------------//
     Comm::SerialBus bus(SystemConfig::rs485());
     if (!bus.open(openError)) {
         Util::Logger::error(QStringLiteral("SerialWorker: %1").arg(openError));
@@ -51,8 +54,14 @@ void SerialWorker::run()
 
     for (const Model::DeviceInfo &device : m_devices) {
         auto client = Comm::createDeviceClient(device.connection, &bus);
+
         collectors.push_back(
-            std::make_unique<Processor::DataCollector>(device, m_deviceList, std::move(client)));
+            std::make_unique<Processor::DataCollector>(
+                device, 
+                m_deviceList, 
+                std::move(client))
+        );
+
         lastPollMs.append(0);
         consecutiveErrors.append(0);
         prevStates.append(Model::DeviceInfo::Status::State::Unknown);
@@ -75,22 +84,27 @@ void SerialWorker::run()
             const qint64 pollStart = QDateTime::currentMSecsSinceEpoch();
             lastPollMs[i] = pollStart;
 
-            bool    allOk     = true;
+            bool allOk = true;
             QString lastError;
 
             if (!m_running) continue;
 
+            //-----------------------------------------------------------//
+            // Collect all fields for this device 
+            // Perform a single batch acture read vi comm for 
+            // each contiguous range of registers to minimize serial bus traffic
+            //-----------------------------------------------------------//
             const QList<Processor::DataCollector::FieldResult> results = collectors[i]->collectAllFields();
 
+            // Update RegisterTable and DeviceList with the results
             for (int fi = 0; fi < m_devices[i].registers.size(); ++fi) {
                 if (!m_running) break;
 
-                const Processor::DataCollector::FieldResult &r     = results.at(fi);
-                const Model::RegisterField                  &field = m_devices[i].registers.at(fi);
+                const Processor::DataCollector::FieldResult &r = results.at(fi);
+                const Model::RegisterConfig &config = m_devices[i].registers.at(fi);
 
-                m_table->updateUnifiedRegister(
-                    m_devices[i].id,
-                    field,
+                m_registerTable->updateState(
+                    config,
                     r.registerValues,
                     r.coilValues,
                     r.ok,
@@ -100,8 +114,8 @@ void SerialWorker::run()
                 if (!r.ok) {
                     allOk     = false;
                     lastError = r.error;
-                    qWarning("Serial poll failed [device %d, field %s]: %s",
-                             m_devices[i].id, qPrintable(field.tagName), qPrintable(r.error));
+                    qWarning("Serial poll failed [device %d, register %s]: %s",
+                             m_devices[i].id, qPrintable(config.tagName), qPrintable(r.error));
                 }
             }
 
@@ -119,17 +133,21 @@ void SerialWorker::run()
             }
             status.consecutiveErrors = consecutiveErrors[i];
 
+            //-----------------------------------------------------------//
+            // Update the device status in the DeviceList
+            //-----------------------------------------------------------//
             m_deviceList->updateStatus(m_devices[i].id, status);
 
+            //-----------------------------------------------------------//
+            // Detect state transitions and log warnings or info messages
+            //-----------------------------------------------------------//
             if (prevStates[i] != status.state) {
                 if (status.state == Model::DeviceInfo::Status::State::Error) {
-                    Util::Logger::warning(
-                        QStringLiteral("[경보] %1 통신 불능: %2")
+                    Util::Logger::warning(QStringLiteral("[경보] %1 통신 불능: %2")
                             .arg(m_devices[i].name, lastError));
                 } else if (status.state == Model::DeviceInfo::Status::State::Ok &&
-                           prevStates[i]  == Model::DeviceInfo::Status::State::Error) {
-                    Util::Logger::info(
-                        QStringLiteral("[복구] %1 통신 정상화")
+                           prevStates[i] == Model::DeviceInfo::Status::State::Error) {
+                    Util::Logger::info(QStringLiteral("[복구] %1 통신 정상화")
                             .arg(m_devices[i].name));
                 }
                 prevStates[i] = status.state;

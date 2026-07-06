@@ -6,7 +6,7 @@ namespace Polling {
 
 PollingManager::PollingManager(std::shared_ptr<Store::RegisterTable> table,
                                std::shared_ptr<Store::DeviceList> deviceList)
-    : m_table(std::move(table))
+    : m_registerTable(std::move(table))
     , m_deviceList(std::move(deviceList))
 {
 }
@@ -23,7 +23,7 @@ bool PollingManager::start(QString& error)
         return false;
     }
 
-    m_table->clear();
+    m_registerTable->clear();
 
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
@@ -37,26 +37,39 @@ bool PollingManager::start(QString& error)
             tcpDevices.append(d);
     }
 
+    //-----------------------------------------------------------//
+    // Start SerialWorker for serial devices 
+    // Manage all serial devices in a single thread to avoid 
+    // conflicts on the same serial port.
+    //-----------------------------------------------------------//
     if (!serialDevices.isEmpty()) {
         m_serialWorker = std::make_unique<SerialWorker>(
-            serialDevices, 
-            m_table, 
+            serialDevices,
+            m_registerTable,
             m_deviceList);
             
         m_serialWorker->start();
-
         Util::Logger::info(QStringLiteral("SerialWorker started: %1 device(s)").arg(serialDevices.size()));
     }
 
+    //-----------------------------------------------------------//
+    // Start TcpWorker for TCP devices
+    // Each TCP device is managed in its own thread to allow
+    // concurrent polling of multiple devices.
+    //-----------------------------------------------------------// 
     for (const Model::DeviceInfo &d : tcpDevices) {
-        auto *worker = new TcpWorker(d, m_table, m_deviceList);
+        auto *worker = new TcpWorker(d, m_registerTable, m_deviceList);
         m_tcpWorkers.append(worker);
+        
         worker->start();
     }
-    if (!tcpDevices.isEmpty())
-        Util::Logger::info(QStringLiteral("TcpWorker started: %1 device(s)").arg(tcpDevices.size()));
 
+    if (!tcpDevices.isEmpty()){
+        Util::Logger::info(QStringLiteral("TcpWorker started: %1 device(s)").arg(tcpDevices.size()));
+    }
+        
     m_running = true;
+
     Util::Logger::info(QStringLiteral("Polling started. Total devices: %1").arg(devices.size()));
     return true;
 }

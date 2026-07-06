@@ -9,9 +9,7 @@
 namespace DataCollection {
 namespace Comm {
 
-std::unique_ptr<IDeviceClient> createDeviceClient(
-    const Model::DeviceConnection &connection,
-    SerialBus *bus)
+std::unique_ptr<IDeviceClient> createDeviceClient(const Model::DeviceConnection &connection, SerialBus *bus)
 {
     switch (connection.protocol) {
 

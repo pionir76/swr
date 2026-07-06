@@ -31,12 +31,14 @@ swr/
       DeviceDatabase.h
       DeviceDatabase.cpp
     model/
-      DeviceModels.h              (DeviceInfo, DeviceConnection, RegisterField, PollingConfig, UserInfo, WriteRequest)
+      DeviceModels.h              (DeviceInfo, DeviceConnection, RegisterConfig, RegisterState, PollingConfig, UserInfo, WriteRequest)
       UnifiedRegister.h
     comm/
       IDeviceClient.h             ← 공통 통신 인터페이스 (프로토콜 추상화)
       DeviceClientFactory.h
       DeviceClientFactory.cpp
+      SerialBus.h                 ← RS485 단일 버스 공유 추상화
+      SerialBus.cpp
       RegisterExecutor.h
       RegisterExecutor.cpp
       modbus/
@@ -49,7 +51,7 @@ swr/
       pclink/
         PcLinkClient.h            ← Samwontech PCLink ASCII over RS485
         PcLinkClient.cpp
-        PcLinkSumTCPClient.h      ← Samwontech PCLink+SUM over TCP (구현 예정)
+        PcLinkSumTCPClient.h      ← Samwontech PCLink+SUM over TCP
         PcLinkSumTCPClient.cpp
     polling/
       PollingManager.h
@@ -95,6 +97,7 @@ swr/
 | 인증 | POST | `/api/login` |
 | 인증 | POST | `/api/logout` |
 | 인증 | GET | `/api/session` |
+| 대시보드 | GET | `/api/dashboard` |
 | 폴링 제어 | GET | `/api/polling/status` |
 | 폴링 제어 | POST | `/api/polling/start` |
 | 폴링 제어 | POST | `/api/polling/stop` |
@@ -105,21 +108,34 @@ swr/
 | 장비 | DELETE | `/api/devices/:id` |
 | 레지스터 | GET | `/api/devices/:id/registers` |
 | 레지스터 | POST | `/api/devices/:id/registers` |
-| 레지스터 | PUT | `/api/devices/:id/registers` |
-| 레지스터 | DELETE | `/api/devices/:id/registers` |
-| 레지스터 | POST | `/api/devices/:id/registers/write` |
+| 레지스터 | PUT | `/api/registers/:id` |
+| 레지스터 | DELETE | `/api/registers/:id` |
+| 레지스터 | POST | `/api/registers/:id/write` |
 | 실시간 값 | GET | `/api/registers/realtime` |
 | 로그 | GET | `/api/logs` |
 | 사용자 | GET | `/api/users` |
 | 사용자 | POST | `/api/users` |
+| 사용자 | PUT | `/api/users/:username` |
 | 사용자 | DELETE | `/api/users/:username` |
+| 사용자 | PUT | `/api/users/:username/password` |
+| 사용자 | PUT | `/api/users/:username/status` |
+| 사용자 | GET | `/api/users/login-history` |
+| 사용자 | DELETE | `/api/users/login-history` |
+| 사용자 | GET | `/api/users/security-policy` |
+| 사용자 | PUT | `/api/users/security-policy` |
 | 시스템 설정 | GET | `/api/config` |
 | 시스템 설정 | POST | `/api/config/reset` |
 | 시스템 설정 | PUT | `/api/config/network` |
 | 시스템 설정 | PUT | `/api/config/serial` |
 | 시스템 설정 | PUT | `/api/config/system` |
 | 시스템 설정 | PUT | `/api/config/modbus-server` |
-| 시스템 설정 | POST | `/api/restart` |
+| 시스템 | POST | `/api/system/restart` |
+| 시스템 | GET | `/api/system/info` |
+| 시스템 | GET | `/api/system/resources` |
+| 유지보수 | GET | `/api/maintenance/backup` |
+| 유지보수 | POST | `/api/maintenance/restore/validate` |
+| 유지보수 | POST | `/api/maintenance/restore/apply` |
+| 유지보수 | POST | `/api/maintenance/factory-reset` |
 
 ### 2) `database/`
 
@@ -141,9 +157,9 @@ swr/
 
 - `DeviceInfo` : 장비 식별 정보, 장비명, 연결 정보, 레지스터 목록, 폴링 설정, 런타임 상태
 - `DeviceConnection` : Serial / TCP 연결 방식, 프로토콜(ModbusRtu/ModbusTcp/ModbusAscii/PcLink/PcLinkSum), IP, 슬레이브 ID, 바이트 오더, 타임아웃
-- `RegisterField` : 레지스터 주소, 타입(Coil/DiscreteInput/HoldingRegister/InputRegister/WordRegister/BitRegister), 스케일, 단위, 바이트 오더, 비트 레이블
+- `RegisterConfig` : DB PK(`id`), 레지스터 주소, 타입(Coil/DiscreteInput/HoldingRegister/InputRegister/WordRegister/BitRegister), 스케일, 단위, 바이트 오더, 비트 레이블, unifiedRegisterId
 - `PollingConfig` : 폴링 주기(ms), 재시도 횟수
-- `UnifiedRegister` : 수집된 실시간 값, 스케일 적용 결과, 유효성 상태, 마지막 갱신 시각
+- `RegisterState` : `RegisterConfig` + 수집된 실시간 값, 스케일 적용 결과, 유효성 상태, 마지막 갱신 시각
 - `UserInfo` : 사용자 ID/명/비밀번호 해시·솔트/권한(User/Manager/Admin)
 - `WriteRequest` : 레지스터 쓰기 요청 정보 (RegisterField + rawValues/coilValues)
 
@@ -155,13 +171,14 @@ swr/
 주요 파일
 
 - `IDeviceClient` : 공통 인터페이스 (`connect()`, `disconnect()`, `readWords()`, `readBits()`, `writeWords()`, `writeBits()`)
-- `modbus/ModbusRTUClient` : RS485 기반 Modbus RTU 구현 (CRC16, QSerialPort)
+- `SerialBus` : RS485 단일 물리 포트(`QSerialPort`)를 감싸는 래퍼. `SerialWorker`가 소유하며, 동일 버스를 공유하는 모든 시리얼 클라이언트에 `SerialBus&` 참조로 전달됨
+- `modbus/ModbusRTUClient` : RS485 기반 Modbus RTU 구현 (CRC16), `SerialBus&` 사용
 - `modbus/ModbusTCPClient` : Ethernet 기반 Modbus TCP 구현 (MBAP Header, QTcpSocket)
-- `modbus/ModbusASCIIClient` : RS485 기반 Modbus ASCII 구현 (LRC, QSerialPort)
-- `pclink/PcLinkClient` : Samwontech PCLink ASCII over RS485 구현
-- `pclink/PcLinkSumTCPClient` : Samwontech PCLink+SUM over TCP (구현 예정)
-- `DeviceClientFactory` : 장비 DeviceConnection 설정을 바탕으로 적합한 IDeviceClient 생성
-- `RegisterExecutor` : RegisterField 기반 읽기/쓰기 실행, 바이트 오더 처리, 최대 읽기 수량 제한(64 words/coils), 배치 읽기(`readBatch`) 지원
+- `modbus/ModbusASCIIClient` : RS485 기반 Modbus ASCII 구현 (LRC), `SerialBus&` 사용
+- `pclink/PcLinkClient` : Samwontech PCLink ASCII over RS485, `SerialBus&` 사용
+- `pclink/PcLinkSumTCPClient` : Samwontech PCLink+SUM over TCP (QTcpSocket, RSD/WSD 연속 읽기/쓰기)
+- `DeviceClientFactory` : `DeviceConnection` 설정을 바탕으로 적합한 `IDeviceClient` 생성. 시리얼 프로토콜은 `SerialBus*`를 추가 인자로 받음
+- `RegisterExecutor` : `RegisterField` 기반 읽기/쓰기 실행, 바이트 오더 처리, 최대 읽기 수량 제한(64 words/coils), 배치 읽기(`readBatch`) 지원
 
 ### 5) `polling/`
 
@@ -171,17 +188,17 @@ swr/
 주요 파일
 
 - `PollingManager` : 장비 목록에서 Serial/TCP를 분리, `SerialWorker`와 `TcpWorker`를 생성·관리
-- `SerialWorker` : QThread 기반, 모든 Serial 장비를 순차 폴링 (RS485 단일 버스 특성상 순차 처리)
-- `TcpWorker` : QThread 기반, 장비 1개당 독립 스레드로 TCP 폴링
+- `SerialWorker` : QThread 기반. 스레드 시작 시 `SerialBus`를 생성하고 포트를 오픈한 뒤, `DeviceClientFactory`로 각 장비의 클라이언트를 생성하여 `DataCollector`에 전달. 모든 Serial 장비를 순차 폴링 (RS485 단일 버스 특성상 순차 처리)
+- `TcpWorker` : QThread 기반, 장비 1개당 독립 스레드로 TCP 폴링. `DeviceClientFactory`로 클라이언트를 생성하여 `DataCollector`에 전달
 
 ### 6) `processor/`
 
 - 실제 통신 수행과 결과 처리 흐름
-- SerialWorker/TcpWorker가 내부적으로 DataCollector를 생성하여 사용
+- `SerialWorker`/`TcpWorker`가 `DataCollector`를 생성하여 사용
 
 주요 파일
 
-- `DataCollector` : DeviceInfo를 받아 `RegisterExecutor`를 통해 레지스터 값을 읽어오는 핵심 엔진, WriteRequest 큐도 처리(`flushWrites`), 연속 주소 필드를 배치로 묶어 단일 요청으로 처리(`collectAllFields` → `buildBatches`)
+- `DataCollector` : 생성자에서 `unique_ptr<IDeviceClient>`를 받아 즉시 `RegisterExecutor`를 구성함. `initialize()` 없음. `collectAllFields()`로 연속 주소 필드를 배치로 묶어 단일 요청 처리, `flushWrites()`로 WriteRequest 큐 처리
 
 ### 7) `store/`
 
@@ -219,8 +236,6 @@ swr/
     DeviceList에서 Serial / TCP 장비 분리
     Serial 장비 → SerialWorker 1개 스레드 (순차 폴링)
     TCP 장비 → TcpWorker N개 스레드 (장비별 독립 폴링)
-    각 Worker는 내부에서 DataCollector를 생성하여 RegisterExecutor로 통신 수행
-    수집 결과 → RegisterTable.updateUnifiedRegister() 갱신
 
 [5] ApiServer (QHttpServer)
     지정 포트(SR_API_PORT, 기본 8080)에서 HTTP 수신 대기
@@ -230,22 +245,30 @@ swr/
     레지스터 쓰기 요청 → DeviceList.enqueueWrite() → Worker 다음 사이클에서 flushWrites() 처리
 
 [6] 폴링 루프 (Worker Thread 반복)
-    SerialWorker / TcpWorker
-    → DataCollector.initialize() → DeviceClientFactory → IDeviceClient 생성
-    → DataCollector.collectAllFields() → buildBatches() → RegisterExecutor.readBatch() → IDeviceClient.readWords()/readBits()
-    → RegisterTable.updateUnifiedRegister() 갱신
-    → DataCollector.flushWrites() → WriteRequest 큐 처리
-    → DeviceList.updateStatus() (폴링 성공/실패 상태 갱신)
+    SerialWorker (스레드 시작 시 1회):
+      SerialBus 생성 → 포트 오픈 (SystemConfig::rs485())
+      각 장비별: DeviceClientFactory → IDeviceClient 생성(SerialBus& 전달) → DataCollector 생성
+    TcpWorker (스레드 시작 시 1회):
+      DeviceClientFactory → IDeviceClient 생성 → DataCollector 생성
+
+    폴링 사이클 반복:
+      DataCollector.collectAllFields() → buildBatches() → RegisterExecutor.readBatch()
+        → IDeviceClient.readWords() / readBits()
+      RegisterTable.updateState() 갱신
+      DataCollector.flushWrites() → WriteRequest 큐 처리
+      DeviceList.updateStatus() (폴링 성공/실패 상태 갱신)
 ```
 
 ## 데이터 흐름
 
 1. 시작 시 `DeviceDatabase`가 SQLite DB를 직접 조회하여 `DeviceInfo`(연결 정보 + 레지스터 목록 + 폴링 설정)를 반환한다.
 2. `DeviceList`가 목록을 메모리에 캐시하고, `PollingManager`가 Serial/TCP 분류 후 Worker 스레드를 시작한다.
-3. 각 Worker는 폴링 주기마다 `DataCollector.collectAllFields()`를 호출한다. 내부에서 연속 주소 필드를 배치로 묶어 `RegisterExecutor.readBatch()` → `IDeviceClient`로 최소 횟수의 통신을 수행한다.
-4. 읽어온 데이터는 `RegisterTable.updateUnifiedRegister()`로 전달되어 스케일 적용, 범위 검사 후 실시간 상태가 갱신된다.
-5. 웹 UI에서 API 요청이 오면 `ApiServer`(QHttpServer)가 수신하여 `DeviceDatabase` 또는 `RegisterTable`을 조회하고 JSON으로 응답한다.
-6. 장비 등록/수정/삭제 시 `DeviceDatabase`와 `DeviceList` 양쪽을 동기화(`syncAddDevice` 등)한다.
+3. `SerialWorker`는 스레드 시작 시 `SerialBus`를 생성하고 포트를 오픈한 뒤, 장비별 클라이언트를 생성하여 `DataCollector`에 전달한다. 이후 모든 `DataCollector`가 동일한 `SerialBus`를 공유하므로 RS485 포트 충돌이 없다.
+4. 각 Worker는 폴링 주기마다 `DataCollector.collectAllFields()`를 호출한다. 내부에서 연속 주소 필드를 배치로 묶어 `RegisterExecutor.readBatch()` → `IDeviceClient`로 최소 횟수의 통신을 수행한다.
+5. 읽어온 데이터는 `RegisterTable.updateState()`로 전달되어 스케일 적용, 범위 검사 후 실시간 상태가 갱신된다.
+6. 웹 UI에서 API 요청이 오면 `ApiServer`(QHttpServer)가 수신하여 `DeviceDatabase` 또는 `RegisterTable`을 조회하고 JSON으로 응답한다.
+7. 장비 등록/수정/삭제 시 `DeviceDatabase`와 `DeviceList` 양쪽을 동기화(`syncAddDevice` 등)한다.
+8. 레지스터 PUT/DELETE는 DB의 `id` 컬럼을 식별자로 사용한다 (address+type 조합 불가).
 
 ## 지원 프로토콜
 
@@ -255,4 +278,4 @@ swr/
 | Modbus ASCII | RS485 (Serial) | 완료 |
 | Modbus TCP | Ethernet (TCP) | 완료 |
 | PCLink ASCII | RS485 (Serial) | 완료 |
-| PCLink+SUM TCP | Ethernet (TCP) | 구현 예정 |
+| PCLink+SUM TCP | Ethernet (TCP) | 완료 |

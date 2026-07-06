@@ -2,11 +2,12 @@
 
 #include <QObject>
 #include <QHttpServer>
+#include <optional>
 
 namespace DataCollection::Database { class DeviceDatabase; }
 namespace DataCollection::Store   { class RegisterTable; class DeviceList; }
 namespace DataCollection::Polling { class PollingManager; }
-namespace DataCollection::Model   { struct DeviceInfo; struct RegisterField; }
+namespace DataCollection::Model   { struct DeviceInfo; struct RegisterConfig; }
 namespace Util { class SystemMonitor; }
 
 namespace Api{
@@ -28,17 +29,18 @@ public:
     void stop();
 
 private:
+    enum class RequiredRole { Any, ManagerOrAbove, AdminOnly };
+
     void setupRoutes();
 
-    bool isAuthenticated(const QHttpServerRequest &request) const;
+    std::optional<QHttpServerResponse> requireAuth(const QHttpServerRequest &request,
+                                                   RequiredRole required = RequiredRole::Any) const;
     QString createSession(const QString &username);
     QString removeSession(const QString &token);  // returns username
 
     // return 409 while polling status, when ask modify.
     bool rejectIfPolling(QHttpServerResponse &out) const;
     QString sessionUsername(const QHttpServerRequest &request) const;
-    bool isLastAdmin(const QString &excludeUsername, QString &error) const;
-
     // Authenticate
     QHttpServerResponse handleLogin(const QHttpServerRequest &request);
     QHttpServerResponse handleLogout(const QHttpServerRequest &request);
@@ -62,9 +64,10 @@ private:
     // Register
     QHttpServerResponse handleGetRegisters(const QHttpServerRequest &request, const QString &deviceId);
     QHttpServerResponse handlePostRegister(const QHttpServerRequest &request, const QString &deviceId);
-    QHttpServerResponse handlePutRegister(const QHttpServerRequest &request, const QString &deviceId);
-    QHttpServerResponse handleDeleteRegister(const QHttpServerRequest &request, const QString &deviceId);
-    QHttpServerResponse handleWriteRegister(const QHttpServerRequest &request, const QString &deviceId);
+    QHttpServerResponse handlePutRegister(const QHttpServerRequest &request, const QString &registerId);
+    QHttpServerResponse handleDeleteRegister(const QHttpServerRequest &request, const QString &registerId);
+    QHttpServerResponse handleCheckUnifiedId(const QHttpServerRequest &request);
+    QHttpServerResponse handleWriteRegister(const QHttpServerRequest &request, const QString &registerId);
 
     // Real time value
     QHttpServerResponse handleGetRealtime(const QHttpServerRequest &request);
@@ -111,9 +114,9 @@ private:
     bool syncAddDevice(const DataCollection::Model::DeviceInfo &device, QString &error);
     bool syncUpdateDevice(const DataCollection::Model::DeviceInfo &device, QString &error);
     bool syncDeleteDevice(int id, QString &error);
-    bool syncAddRegister(int deviceId, const DataCollection::Model::RegisterField &field, QString &error);
-    bool syncUpdateRegister(int deviceId, const DataCollection::Model::RegisterField &field, QString &error);
-    bool syncDeleteRegister(int deviceId, int registerId, QString &error);
+    bool syncAddRegister(int deviceId, DataCollection::Model::RegisterConfig &config, QString &error);
+    bool syncUpdateRegister(DataCollection::Model::RegisterConfig config, QString &error);
+    bool syncDeleteRegister(int registerId, QString &error);
 
 private:
     DataCollection::Database::DeviceDatabase *m_db;

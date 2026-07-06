@@ -8,8 +8,12 @@
 namespace DataCollection {
 namespace Comm {
 
-// Translates RegisterField read/write requests into IDeviceClient calls.
+//--------------------------------------------------------------------------------//
+// Executes read/write requests for a single device using an IDeviceClient.
+//
+// Translates RegisterConfig read/write requests into IDeviceClient calls.
 // Protocol-agnostic: works with any IDeviceClient implementation.
+//--------------------------------------------------------------------------------//
 class RegisterExecutor {
 public:
     // Maximum registers/coils per batch read request. Not a per-field limit.
@@ -22,7 +26,7 @@ public:
     void disconnect();
     bool isConnected() const;
 
-    bool readField(const Model::RegisterField &field,
+    bool readField(const Model::RegisterConfig &config,
                    QVector<quint16> &registerValues,
                    QVector<bool> &coilValues,
                    QString &error);
@@ -34,18 +38,18 @@ public:
                    QVector<bool>    &coilValues,
                    QString          &error);
 
-    bool writeField(const Model::RegisterField &field,
+    bool writeField(const Model::RegisterConfig &config,
                     const QVector<quint16> &registerValues,
                     const QVector<bool> &coilValues,
                     QString &error);
 
     QVector<quint16> applyFieldByteOrder(const QVector<quint16> &values,
-                                         const Model::RegisterField &field) const;
+                                         const Model::RegisterConfig &config) const;
 
 private:
     QVector<quint16> applyByteOrder(const QVector<quint16> &values,
                                     Model::ByteOrder byteOrder) const;
-    Model::ByteOrder effectiveByteOrder(const Model::RegisterField &field) const;
+    Model::ByteOrder effectiveByteOrder(const Model::RegisterConfig &config) const;
 
     std::unique_ptr<IDeviceClient> m_client;
     Model::ByteOrder m_defaultByteOrder;

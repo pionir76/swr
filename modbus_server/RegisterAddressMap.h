@@ -26,7 +26,7 @@ namespace ModbusServer {
 
 // 단일 주소 매핑 항목
 struct AddressEntry {
-    int      unifiedId;     // UnifiedRegister ID
+    int      unifiedId;     // RegisterState ID (unifiedRegisterId)
     quint16  modbusAddress; // 외부 Modbus 마스터에 노출될 주소
     bool     isCustom;      // false: 자동(기본), true: 사용자 지정
 };

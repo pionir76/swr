@@ -69,8 +69,6 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
 
 add_executable(swr
   main.cpp
-  development-plan.md
-
 
   utils/Logger.h
   utils/Logger.cpp
@@ -79,18 +77,12 @@ add_executable(swr
   data_collection/model/DeviceModels.h
   data_collection/store/RegisterTable.h data_collection/store/RegisterTable.cpp
   data_collection/model/UnifiedRegister.h
-
   data_collection/polling/PollingManager.h data_collection/polling/PollingManager.cpp
   data_collection/polling/SerialWorker.h data_collection/polling/SerialWorker.cpp
   data_collection/polling/TcpWorker.h data_collection/polling/TcpWorker.cpp
   data_collection/store/DeviceList.h data_collection/store/DeviceList.cpp
   api/ApiServer.h api/ApiServer.cpp
-
   data_collection/processor/DataCollector.h data_collection/processor/DataCollector.cpp
-
-
-
-
   data_collection/comm/modbus/ModbusASCIIClient.h data_collection/comm/modbus/ModbusASCIIClient.cpp
   data_collection/comm/modbus/ModbusRTUClient.h data_collection/comm/modbus/ModbusRTUClient.cpp
   data_collection/comm/modbus/ModbusTCPClient.h data_collection/comm/modbus/ModbusTCPClient.cpp
@@ -99,19 +91,12 @@ add_executable(swr
   data_collection/comm/SerialBus.h data_collection/comm/SerialBus.cpp
   data_collection/comm/DeviceClientFactory.h data_collection/comm/DeviceClientFactory.cpp
   data_collection/comm/RegisterExecutor.h data_collection/comm/RegisterExecutor.cpp
-  data_collection/store/RegisterTable.md
   data_collection/comm/pclink/PcLinkSumTCPClient.h data_collection/comm/pclink/PcLinkSumTCPClient.cpp
   config/AppConfig.h config/AppConfig.cpp
   config/SystemConfig.h config/SystemConfig.cpp
   utils/NetworkConfigurator.h utils/NetworkConfigurator.cpp
-  spec.md
-  data-collection-architecture.md
-  Modbus_Comm_Spec.md
-
   modbus_server/RegisterAddressMap.h modbus_server/RegisterAddressMap.cpp
   modbus_server/ModbusTcpServer.h modbus_server/ModbusTcpServer.cpp
-  modbus_server/README.md
-
   maintenance/BackupModels.h
   maintenance/BackupManager.h maintenance/BackupManager.cpp
   maintenance/RestoreManager.h maintenance/RestoreManager.cpp

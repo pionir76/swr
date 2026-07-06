@@ -216,7 +216,7 @@ QByteArray BackupManager::buildRegisters(const DataCollection::Database::DeviceD
 
     QJsonArray arr;
     for (const DeviceInfo &d : devices) {
-        for (const RegisterField &f : d.registers) {
+        for (const RegisterConfig &f : d.registers) {
             QJsonObject obj;
             obj[QLatin1String("deviceId")]          = d.id;
             obj[QLatin1String("tagName")]            = f.tagName;

@@ -54,6 +54,7 @@ public:
     static void error(const QString &message);
 
     static QList<LogEntry> fetch(int limit,
+                                 int offset,
                                  const QString &level,
                                  const QString &from,
                                  const QString &to,

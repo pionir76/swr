@@ -21,7 +21,7 @@ public:
     bool isRunning() const;
 
 private:
-    std::shared_ptr<Store::RegisterTable> m_table;
+    std::shared_ptr<Store::RegisterTable> m_registerTable;
     std::shared_ptr<Store::DeviceList> m_deviceList;
 
     std::unique_ptr<SerialWorker> m_serialWorker;

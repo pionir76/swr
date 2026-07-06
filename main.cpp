@@ -98,16 +98,13 @@ int main(int argc, char *argv[])
 
         QString netError;
         if (!Util::applyNetworkConfig(netConfig, netError)) {
-            Util::Logger::error(
-                QStringLiteral("Network config failed [%1]: %2").arg(iface.name, netError));
+            Util::Logger::error(QStringLiteral("Network config failed [%1]: %2").arg(iface.name, netError));
         } else {
-            Util::Logger::info(
-                QStringLiteral("Network configured: %1 (%2) → %3")
+            Util::Logger::info(QStringLiteral("Network configured: %1 (%2) → %3")
                     .arg(iface.name, iface.role, iface.ipAddress));
         }
     }
     */
-
 
     //-----------------------------------------------------------------//
     // Open SQLite DB & Init Schema
@@ -154,6 +151,7 @@ int main(int argc, char *argv[])
         if (!loadError.isEmpty()) {
             Util::Logger::error(QStringLiteral("Failed to load devices: %1").arg(loadError));
         }
+
         else {
             deviceList->reset(devices);
             Util::Logger::info(QStringLiteral("DeviceList loaded: %1 device(s)").arg(devices.size()));
@@ -185,6 +183,11 @@ int main(int argc, char *argv[])
     }
 
     const int result = app.exec();
+
+    //-----------------------------------------------------------//
+    // Flush remaining entries.
+    //-----------------------------------------------------------//
     Util::Logger::shutdown();
+
     return result;
 }

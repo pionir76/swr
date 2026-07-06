@@ -127,9 +127,12 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 | GET/POST | `/api/devices` | 장비 목록 / 등록 |
 | GET/PUT/DELETE | `/api/devices/<id>` | 장비 조회 / 수정 / 삭제 |
 | GET/POST | `/api/devices/<id>/registers` | 레지스터 목록 / 등록 |
-| PUT/DELETE | `/api/devices/<id>/registers/<addr>` | 레지스터 수정 / 삭제 |
-| GET | `/api/realtime` | 실시간 레지스터 값 |
-| GET/POST | `/api/polling/status` | 폴링 상태 |
+| PUT | `/api/registers/<id>` | 레지스터 수정 |
+| DELETE | `/api/registers/<id>` | 레지스터 삭제 |
+| POST | `/api/registers/<id>/write` | 레지스터 쓰기 |
+| GET | `/api/registers/unified-id/check` | 통합 ID 사용 여부 확인 |
+| GET | `/api/registers/realtime` | 실시간 레지스터 값 |
+| GET | `/api/polling/status` | 폴링 상태 |
 | POST | `/api/polling/start` | 폴링 시작 |
 | POST | `/api/polling/stop` | 폴링 중지 |
 | GET/PUT | `/api/config/system` | 시스템 설정 |
@@ -177,7 +180,7 @@ swr/
 ├── data_collection/
 │   ├── comm/                   # 통신 클라이언트 (Modbus, PCLink)
 │   ├── database/               # SQLite DB 접근 (DeviceDatabase)
-│   ├── model/                  # 데이터 모델 (DeviceInfo, RegisterField)
+│   ├── model/                  # 데이터 모델 (DeviceInfo, RegisterConfig, RegisterState)
 │   ├── polling/                # 폴링 엔진 (SerialWorker, TcpWorker)
 │   ├── processor/              # DataCollector
 │   └── store/                  # 메모리 캐시 (RegisterTable, DeviceList)
