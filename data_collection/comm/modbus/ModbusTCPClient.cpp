@@ -60,8 +60,6 @@ bool ModbusTCPClient::readWords(int address, int count, QVector<quint16> &out, Q
         return false;
     }
 
-    //qDebug() << request << response;
-
     out.clear();
     out.reserve(count);
     for (int i = 0; i < count; ++i) {
@@ -244,7 +242,7 @@ bool ModbusTCPClient::sendRequest(const QByteArray &request, QByteArray &respons
     }
 
     response = m_socket.readAll();
-    while (m_socket.waitForReadyRead(50)) {
+    while (m_socket.waitForReadyRead(200)) {
         response.append(m_socket.readAll());
     }
 
@@ -256,42 +254,109 @@ bool ModbusTCPClient::sendRequest(const QByteArray &request, QByteArray &respons
     return true;
 }
 
+    //-------------------------------------------------------------------------//
+    // Modbus TCP Response Frame Structure (MBAP Header + PDU)
+    //
+    // ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┬──────────┐
+    // │ [0]    │ [1]    │ [2]    │ [3]    │ [4]    │ [5]    │ [6]    │ [7]    │ [8]    │ [9..]    │
+    // │ Tx ID  │ Tx ID  │ Proto  │ Proto  │ Length │ Length │ Unit   │   FC   │  Data  │  Data    │
+    // │  Hi    │  Lo    │  Hi    │  Lo    │  Hi    │  Lo    │  ID    │        │        │          │
+    // │        │        │(0x00)  │(0x00)  │        │        │(SlaveID│        │        │          │
+    // └────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┴──────────┘
+    // <---------------- MBAP Header (6 bytes) ---------------->|<-------- PDU ------------------>
+    //
+    // [0][1]  Transaction ID : Echo of the ID set by master in the request
+    // [2][3]  Protocol ID    : Always 0x0000 for Modbus TCP
+    // [4][5]  Length         : Number of bytes from [6] to end (Unit ID + FC + Data)
+    // [6]     Unit ID        : Slave ID — same role as SlaveID in RTU/ASCII
+    // [7]     Function Code  : Echo of request FC (FC | 0x80 on error)
+    //
+    // -- Read Response (FC01 / FC03) --
+    // [8]     Byte Count     : Number of data bytes that follow (FC03: count x 2, FC01: ceil(count/8))
+    // [9..]   Data           : Register or coil values
+    //
+    // -- Write Response (FC05 / FC06 / FC0F / FC10) --
+    // [8][9]  Start Address  : Echo of requested address
+    // [10][11] Value / Count : Echo of written value or quantity
+    //
+    // -- Exception Response --
+    // [7]     FC | 0x80      : e.g. FC03 error -> 0x83
+    // [8]     Exception Code : 0x01 Illegal Function
+    //                          0x02 Illegal Data Address
+    //                          0x03 Illegal Data Value
+    //                          0x04 Slave Device Failure
+    //
+    // Minimum valid frame size = MBAP(6) + UnitID(1) + FC(1) + Data(1) = 9 bytes
+    //-------------------------------------------------------------------------//
 bool ModbusTCPClient::verifyResponse(const QByteArray &response,
                                      quint8 expectedFunction,
                                      int expectedDataBytes,
                                      QString &error) const
 {
+    //---------------------------------------------------------------------//
+    // Check if the response is long enough to contain the minimum required fields
+    //---------------------------------------------------------------------//
     if (response.size() < 9) {
-        const_cast<ModbusTCPClient *>(this)->m_lastError = QStringLiteral("TCP response too short");
+        m_lastError = QStringLiteral("TCP response too short");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // verify Unit ID matches the requested device
+    //---------------------------------------------------------------------//
+    if (static_cast<quint8>(response.at(6)) != static_cast<quint8>(m_connection.slaveId)) {
+        m_lastError = QStringLiteral("TCP unit ID mismatch (expected %1, got %2)")
+            .arg(m_connection.slaveId)
+            .arg(static_cast<quint8>(response.at(6)));
+        error = m_lastError;
+        return false;
+    }
+
+    //---------------------------------------------------------------------//
+    // Modbus exception response: Sender FC | 0x80, Exception Code
+    // e.g., if the request FC is 0x03, the exception response FC will be 0x83, 
+    // followed by the exception code. 
+    // FC = 0x03  →  error response FC = 0x83
+    // FC = 0x06  →  error response FC = 0x86
+    //---------------------------------------------------------------------//
     const quint8 functionCode = static_cast<quint8>(response.at(7));
     if (functionCode == static_cast<quint8>(expectedFunction | 0x80)) {
         const quint8 exceptionCode = static_cast<quint8>(response.at(8));
-        const_cast<ModbusTCPClient *>(this)->m_lastError = QStringLiteral("Modbus exception %1").arg(exceptionCode);
+        m_lastError = QStringLiteral("Modbus exception %1").arg(exceptionCode);
         error = m_lastError;
         return false;
     }
 
     if (functionCode != expectedFunction) {
-        const_cast<ModbusTCPClient *>(this)->m_lastError = QStringLiteral("TCP function code mismatch");
+        m_lastError = QStringLiteral("TCP function code mismatch");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // Check the byte count for read functions (0x01, 0x03) 
+    // or the response length for write functions
+    //---------------------------------------------------------------------//
     if (expectedFunction == 0x01 || expectedFunction == 0x03) {
         const quint8 byteCount = static_cast<quint8>(response.at(8));
         if (byteCount != expectedDataBytes) {
-            const_cast<ModbusTCPClient *>(this)->m_lastError = QStringLiteral("TCP byte count mismatch");
+            m_lastError = QStringLiteral("TCP byte count mismatch");
+            error = m_lastError;
+            return false;
+        }
+        //---------------------------------------------------------------------//
+        // Verify actual buffer holds enough bytes beyond the header
+        //---------------------------------------------------------------------//
+        if (response.size() < 9 + expectedDataBytes) {
+            m_lastError = QStringLiteral("TCP response buffer too short");
             error = m_lastError;
             return false;
         }
     } else if (expectedDataBytes >= 0) {
         const int actualBytes = response.size() - 8;
         if (actualBytes != expectedDataBytes) {
-            const_cast<ModbusTCPClient *>(this)->m_lastError = QStringLiteral("TCP response length mismatch");
+            m_lastError = QStringLiteral("TCP response length mismatch");
             error = m_lastError;
             return false;
         }

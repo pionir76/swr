@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=yes root@192.168.0.150 'echo connected')",
-      "Bash(ssh -i /home/dev3/.ssh/qtc_id -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.0.150 'echo connected')"
+      "Bash(ssh -i /home/dev3/.ssh/qtc_id -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.0.150 'echo connected')",
+      "Bash(/home/dev3/yocto-imx6ull/build-swr/tmp/work/sdk-provides-dummy-target-poky-linux/target-sdk-provides-dummy/1.0/recipe-sysroot-native/usr/bin/dpkg-deb --help)",
+      "Bash(python3 -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(dpkg -l python3)",
+      "Read(//boot/**)",
+      "Read(//var/log/**)",
+      "Bash(dpkg-deb --contents /home/dev3/yocto-imx6ull/build-swr/tmp/work/cortexa7t2hf-neon-poky-linux-gnueabi/qtserialbus/6.8.3/deploy-debs/cortexa7t2hf-neon/libqt6serialbus6_6.8.3-r0_armhf.deb)"
+    ],
+    "additionalDirectories": [
+      "/home/dev3/yocto-imx6ull/sources/meta-swr/recipes-qt/qt6"
     ]
   }
 }

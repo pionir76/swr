@@ -9,13 +9,6 @@
 namespace DataCollection{
 namespace Database{
 
-enum class LoginResult {
-    Success,
-    InvalidCredentials,  // Username or password incorrect
-    AccountDisabled,     // User account is disabled
-    AccountLocked        // User account is locked due to too many failed login attempts
-};
-
 class DeviceDatabase
 {
 public:
@@ -48,11 +41,11 @@ public:
     bool updateUser(const Model::UserInfo &user, QString &error);
     bool deleteUser(const QString &username, QString &error);
 
-    LoginResult validateUser(const QString &username,
-                             const QString &password,
-                             const QString &ip,
-                             int maxFailedAttempts,
-                             QString &error);
+    Model::LoginResult validateUser(const QString &username,
+                                    const QString &password,
+                                    const QString &ip,
+                                    int maxFailedAttempts,
+                                    QString &error);
 
     // Login History
     bool insertLoginHistory(const Model::LoginHistoryEntry &entry, QString &error);

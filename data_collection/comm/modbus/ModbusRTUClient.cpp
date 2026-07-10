@@ -8,8 +8,10 @@ ModbusRTUClient::ModbusRTUClient(const Model::DeviceConnection &connection, Seri
     , m_bus(bus)
 {}
 
-bool ModbusRTUClient::readWords(int address, int count,
-                                QVector<quint16> &out, QString &error)
+bool ModbusRTUClient::readWords(int address, 
+                                int count,
+                                QVector<quint16> &out, 
+                                QString &error)
 {
     if (!m_bus.isOpen()) {
         m_lastError = QStringLiteral("RTU: serial bus not open");
@@ -33,8 +35,10 @@ bool ModbusRTUClient::readWords(int address, int count,
     return true;
 }
 
-bool ModbusRTUClient::readBits(int address, int count,
-                               QVector<bool> &out, QString &error)
+bool ModbusRTUClient::readBits(int address, 
+                               int count,
+                               QVector<bool> &out, 
+                               QString &error)
 {
     if (!m_bus.isOpen()) {
         m_lastError = QStringLiteral("RTU: serial bus not open");
@@ -57,7 +61,9 @@ bool ModbusRTUClient::readBits(int address, int count,
     return true;
 }
 
-bool ModbusRTUClient::writeWords(int address, const QVector<quint16> &values, QString &error)
+bool ModbusRTUClient::writeWords(int address, 
+                                 const QVector<quint16> &values, 
+                                 QString &error)
 {
     if (!m_bus.isOpen()) {
         m_lastError = QStringLiteral("RTU: serial bus not open");
@@ -81,7 +87,9 @@ bool ModbusRTUClient::writeWords(int address, const QVector<quint16> &values, QS
     return verifyResponse(response, expectedFc, 4, error);
 }
 
-bool ModbusRTUClient::writeBits(int address, const QVector<bool> &values, QString &error)
+bool ModbusRTUClient::writeBits(int address, 
+                                const QVector<bool> &values, 
+                                QString &error)
 {
     if (!m_bus.isOpen()) {
         m_lastError = QStringLiteral("RTU: serial bus not open");
@@ -119,6 +127,7 @@ QByteArray ModbusRTUClient::buildReadRequest(quint8 functionCode, int startAddre
     frame.append(static_cast<char>(startAddress & 0xFF));
     frame.append(static_cast<char>((quantity >> 8) & 0xFF));
     frame.append(static_cast<char>(quantity & 0xFF));
+
     const quint16 crc = crc16(frame);
     frame.append(static_cast<char>(crc & 0xFF));
     frame.append(static_cast<char>((crc >> 8) & 0xFF));
@@ -134,6 +143,7 @@ QByteArray ModbusRTUClient::buildWriteSingleCoilRequest(int address, bool value)
     frame.append(static_cast<char>(address & 0xFF));
     frame.append(static_cast<char>(value ? 0xFF : 0x00));
     frame.append(static_cast<char>(0x00));
+
     const quint16 crc = crc16(frame);
     frame.append(static_cast<char>(crc & 0xFF));
     frame.append(static_cast<char>((crc >> 8) & 0xFF));
@@ -149,6 +159,7 @@ QByteArray ModbusRTUClient::buildWriteSingleRegisterRequest(int address, quint16
     frame.append(static_cast<char>(address & 0xFF));
     frame.append(static_cast<char>((value >> 8) & 0xFF));
     frame.append(static_cast<char>(value & 0xFF));
+
     const quint16 crc = crc16(frame);
     frame.append(static_cast<char>(crc & 0xFF));
     frame.append(static_cast<char>((crc >> 8) & 0xFF));
@@ -168,6 +179,7 @@ QByteArray ModbusRTUClient::buildWriteMultipleCoilsRequest(int startAddress, con
     frame.append(static_cast<char>(quantity & 0xFF));
     frame.append(static_cast<char>(packed.size()));
     frame.append(packed);
+
     const quint16 crc = crc16(frame);
     frame.append(static_cast<char>(crc & 0xFF));
     frame.append(static_cast<char>((crc >> 8) & 0xFF));
@@ -189,6 +201,7 @@ QByteArray ModbusRTUClient::buildWriteMultipleRegistersRequest(int startAddress,
         frame.append(static_cast<char>((v >> 8) & 0xFF));
         frame.append(static_cast<char>(v & 0xFF));
     }
+
     const quint16 crc = crc16(frame);
     frame.append(static_cast<char>(crc & 0xFF));
     frame.append(static_cast<char>((crc >> 8) & 0xFF));
@@ -239,62 +252,112 @@ bool ModbusRTUClient::sendRequest(const QByteArray &request,
     }
 
     response = m_bus.readAll();
-    while (m_bus.waitForReadyRead(50))
+    while (m_bus.waitForReadyRead(200)){
         response.append(m_bus.readAll());
-
-    if (response.size() < 5) {
-        m_lastError = QStringLiteral("RTU response too short");
-        error = m_lastError;
-        return false;
     }
+
     return true;
 }
 
+
+//--------------------------------------------------------------------//
+// RTU response format:
+// ┌──────────┬──────────┬──────────────┬──────┬──────┐
+// │ SlaveID  │    FC    │     Data     │ CRC  │ CRC  │
+// │  1 byte  │  1 byte  │   N bytes    │ Low  │ High │
+// │ payload  │ payload  │   payload    │      │      │
+// └──────────┴──────────┴──────────────┴──────┴──────┘
+// response[0]  [1]        [2..]    [size-2] [size-1]
+// ←──────────── payload ──────────→←── CRC ──→
+//--------------------------------------------------------------------//
 bool ModbusRTUClient::verifyResponse(const QByteArray &response,
                                      quint8 expectedFunction,
                                      int expectedDataBytes,
                                      QString &error) const
 {
+    //---------------------------------------------------------------------//
+    // Check if the response is long enough to contain the minimum required fields
+    //---------------------------------------------------------------------//
     if (response.size() < 5) {
-        const_cast<ModbusRTUClient *>(this)->m_lastError = QStringLiteral("RTU response too short");
+        m_lastError = QStringLiteral("RTU response too short");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // Verify CRC
+    //---------------------------------------------------------------------//
     const int     frameSize   = response.size();
     const quint16 receivedCrc = static_cast<quint8>(response.at(frameSize - 2)) |
-                                (static_cast<quint8>(response.at(frameSize - 1)) << 8);
+                               (static_cast<quint8>(response.at(frameSize - 1)) << 8);
     const QByteArray payload  = response.left(frameSize - 2);
 
     if (crc16(payload) != receivedCrc) {
-        const_cast<ModbusRTUClient *>(this)->m_lastError = QStringLiteral("RTU CRC mismatch");
+        m_lastError = QStringLiteral("RTU CRC mismatch");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // verify slave ID matches the requested device
+    //---------------------------------------------------------------------//
+    if (static_cast<quint8>(payload.at(0)) != static_cast<quint8>(m_connection.slaveId)) {
+        m_lastError =
+            QStringLiteral("RTU slave ID mismatch (expected %1, got %2)")
+                .arg(m_connection.slaveId)
+                .arg(static_cast<quint8>(payload.at(0)));
+        error = m_lastError;
+        return false;
+    }
+
+    //---------------------------------------------------------------------//
+    // Modbus exception response: Sender FC | 0x80, Exception Code
+    // e.g., if the request FC is 0x03, the exception response FC will be 0x83, 
+    // followed by the exception code. 
+    // FC = 0x03  →  error response FC = 0x83
+    // FC = 0x06  →  error response FC = 0x86
+    //---------------------------------------------------------------------//
     const quint8 functionCode = static_cast<quint8>(payload.at(1));
     if (functionCode == static_cast<quint8>(expectedFunction | 0x80)) {
+
+        // Exception Code : responsePdu[2]
+        // 0x01	Illegal Function
+        // 0x02	Illegal Data Address
+        // 0x03	Illegal Data Value
+        // 0x04	Slave Device Failure
         const quint8 exceptionCode = static_cast<quint8>(payload.at(2));
-        const_cast<ModbusRTUClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("Modbus exception %1").arg(exceptionCode);
         error = m_lastError;
         return false;
     }
 
     if (functionCode != expectedFunction) {
-        const_cast<ModbusRTUClient *>(this)->m_lastError = QStringLiteral("RTU function code mismatch");
+        m_lastError = QStringLiteral("RTU function code mismatch");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // Check the byte count for read functions (0x01, 0x03) 
+    // or the response length for write functions
+    //---------------------------------------------------------------------//
     if (expectedFunction == 0x01 || expectedFunction == 0x03) {
         if (static_cast<quint8>(payload.at(2)) != expectedDataBytes) {
-            const_cast<ModbusRTUClient *>(this)->m_lastError = QStringLiteral("RTU byte count mismatch");
+            m_lastError = QStringLiteral("RTU byte count mismatch");
+            error = m_lastError;
+            return false;
+        }
+        //---------------------------------------------------------------------//
+        // verify actual buffer holds enough bytes beyond the header
+        //---------------------------------------------------------------------//
+        if (payload.size() < 3 + expectedDataBytes) {
+            m_lastError = QStringLiteral("RTU response buffer too short");
             error = m_lastError;
             return false;
         }
     } else if (expectedDataBytes >= 0 && (payload.size() - 2) != expectedDataBytes) {
-        const_cast<ModbusRTUClient *>(this)->m_lastError = QStringLiteral("RTU response length mismatch");
+        m_lastError = QStringLiteral("RTU response length mismatch");
         error = m_lastError;
         return false;
     }

@@ -49,7 +49,7 @@ bool DeviceDatabase::open(const QString& dbPath, QString& error)
 
     //-----------------------------------------------------------//
     // Initialize the database schema if it doesn't exist
-    // No problem if the tables already exist, 
+    // No problem if the tables already exist,
     // as CREATE TABLE IF NOT EXISTS will not overwrite existing tables.
     //-----------------------------------------------------------//
     return initSchema(error);
@@ -165,6 +165,7 @@ bool DeviceDatabase::resetSchema(QString& error)
     return initSchema(error);
 }
 
+
 bool DeviceDatabase::initSchema(QString& error)
 {
     if (!isOpen()) {
@@ -249,7 +250,7 @@ bool DeviceDatabase::initSchema(QString& error)
             "  timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "  username  TEXT NOT NULL,"
             "  action    TEXT NOT NULL CHECK(action IN ('login', 'logout')),"
-            "  result    TEXT NOT NULL CHECK(result IN ('success', 'fail')),"
+            "  result    TEXT NOT NULL CHECK(result IN ('success', 'invalid_password', 'account_locked', 'account_disabled')),"
             "  ip        TEXT"
             ")"
         ),
@@ -521,11 +522,11 @@ QList<Model::RegisterConfig> DeviceDatabase::loadRegisters(int deviceId, QString
         config.id                = q.value(0).toInt();
         config.deviceId          = deviceId;
         config.tagName           = q.value(1).toString();
-        config.address           = q.value(2).toInt();
-        config.type              = Model::registerTypeFromString(q.value(3).toString());
-        config.readOnly          = q.value(4).toBool();
-        config.length            = q.value(5).toInt();
-        config.unifiedRegisterId = q.value(6).toInt();
+        config.localAddress  = q.value(2).toInt();   // DB column: address
+        config.type          = Model::registerTypeFromString(q.value(3).toString());
+        config.readOnly      = q.value(4).toBool();
+        config.length        = q.value(5).toInt();
+        config.unifiedAddress = q.value(6).toInt();  // DB column: unified_register_id
         config.displayName       = q.value(7).toString();
         config.unit              = q.value(8).toString();
         config.scale             = q.value(9).toDouble();
@@ -561,11 +562,11 @@ bool DeviceDatabase::insertRegister(int deviceId, Model::RegisterConfig &config,
 
     q.bindValue(":device_id",           deviceId);
     q.bindValue(":name",                config.tagName);
-    q.bindValue(":address",             config.address);
+    q.bindValue(":address",             config.localAddress);        // TODO: rename DB column address -> local_address
     q.bindValue(":type",                Model::registerTypeToString(config.type));
     q.bindValue(":read_only",           config.readOnly ? 1 : 0);
     q.bindValue(":length",              config.length);
-    q.bindValue(":unified_register_id", config.unifiedRegisterId);
+    q.bindValue(":unified_register_id", config.unifiedAddress);      // TODO: rename DB column unified_register_id -> unified_address
     q.bindValue(":display_name",        config.displayName);
     q.bindValue(":unit",                config.unit);
     q.bindValue(":scale",               config.scale);
@@ -584,12 +585,12 @@ bool DeviceDatabase::insertRegister(int deviceId, Model::RegisterConfig &config,
     config.deviceId = deviceId;
 
     //---------------------------------------------------------//
-    // Auto-assign unifiedRegisterId if not specified (< 0).
+    // Auto-assign unifiedAddress if not specified (< 0).
     // Auto range: 1 ~ kAutoUnifiedIdMax (kManualUnifiedIdMin and above are reserved for manual assignment).
     // The row was inserted with uid=-1 first; the actual ID is assigned via a
     // separate UPDATE so we can reference the newly inserted row by its PK.
     //---------------------------------------------------------//
-    if (config.unifiedRegisterId < 0) {
+    if (config.unifiedAddress < 0) {
         QSqlQuery q2(db);
 
         //---------------------------------------------------------//
@@ -634,7 +635,7 @@ bool DeviceDatabase::insertRegister(int deviceId, Model::RegisterConfig &config,
         //---------------------------------------------------------//
         // Reflect the assigned ID in the caller's config object.
         //---------------------------------------------------------//
-        config.unifiedRegisterId = newUnifiedId;
+        config.unifiedAddress = newUnifiedId;
     }
 
     return true;
@@ -644,7 +645,7 @@ bool DeviceDatabase::updateRegister(Model::RegisterConfig &config, QString &erro
 {
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
 
-    if (config.unifiedRegisterId < 0) {
+    if (config.unifiedAddress < 0) {
         QSqlQuery q2(db);
         q2.prepare(QStringLiteral(
             "SELECT COALESCE(MAX(unified_register_id), 0) + 1 "
@@ -659,7 +660,7 @@ bool DeviceDatabase::updateRegister(Model::RegisterConfig &config, QString &erro
             error = QStringLiteral("Auto-assign range exhausted (max %1)").arg(Model::kAutoUnifiedIdMax);
             return false;
         }
-        config.unifiedRegisterId = newUnifiedId;
+        config.unifiedAddress = newUnifiedId;
     }
 
     QSqlQuery q(db);
@@ -673,11 +674,11 @@ bool DeviceDatabase::updateRegister(Model::RegisterConfig &config, QString &erro
 
     q.bindValue(":id",                  config.id);
     q.bindValue(":name",                config.tagName);
-    q.bindValue(":address",             config.address);
+    q.bindValue(":address",             config.localAddress);        // TODO: rename DB column address -> local_address
     q.bindValue(":type",                Model::registerTypeToString(config.type));
     q.bindValue(":read_only",           config.readOnly ? 1 : 0);
     q.bindValue(":length",              config.length);
-    q.bindValue(":unified_register_id", config.unifiedRegisterId);
+    q.bindValue(":unified_register_id", config.unifiedAddress);      // TODO: rename DB column unified_register_id -> unified_address
     q.bindValue(":display_name",        config.displayName);
     q.bindValue(":unit",                config.unit);
     q.bindValue(":scale",               config.scale);
@@ -884,15 +885,15 @@ bool DeviceDatabase::deleteUser(const QString &username, QString &error)
     return true;
 }
 
-LoginResult DeviceDatabase::validateUser(const QString &username,
-                                          const QString &password,
-                                          const QString &ip,
-                                          int maxFailedAttempts,
-                                          QString &error)
+Model::LoginResult DeviceDatabase::validateUser(const QString &username,
+                                                const QString &password,
+                                                const QString &ip,
+                                                int maxFailedAttempts,
+                                                QString &error)
 {
     if (!isOpen()) {
         error = QStringLiteral("Database is not open.");
-        return LoginResult::InvalidCredentials;
+        return Model::LoginResult::InvalidCredentials;
     }
 
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
@@ -906,12 +907,12 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
 
     if (!q.exec()) {
         error = q.lastError().text();
-        return LoginResult::InvalidCredentials;
+        return Model::LoginResult::InvalidCredentials;
     }
 
     // Not exist user.
     if (!q.next())
-        return LoginResult::InvalidCredentials;
+        return Model::LoginResult::InvalidCredentials;
 
     const int userId         = q.value(0).toInt();
     const QString storedHash = q.value(1).toString();
@@ -922,13 +923,13 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     // 2. Is Disabled User?
     if (status == Model::UserStatus::Disabled) {
         error = QStringLiteral("Account is disabled.");
-        return LoginResult::AccountDisabled;
+        return Model::LoginResult::AccountDisabled;
     }
 
     // 3. Is Locked User?
     if (status == Model::UserStatus::Locked) {
         error = QStringLiteral("Account is locked. Contact administrator.");
-        return LoginResult::AccountLocked;
+        return Model::LoginResult::AccountLocked;
     }
 
     // 4. Verify password
@@ -949,7 +950,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
                 lockQ.bindValue(":username", username);
                 lockQ.exec();
                 error = QStringLiteral("Account locked due to too many failed attempts. Contact administrator.");
-                return LoginResult::AccountLocked;
+                return Model::LoginResult::AccountJustLocked;
             }
 
             QSqlQuery failQ(db);
@@ -960,7 +961,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
             failQ.exec();
         }
 
-        return LoginResult::InvalidCredentials;
+        return Model::LoginResult::InvalidCredentials;
     }
 
     // 5. Success , Reset failed login count, last login data & ip
@@ -975,7 +976,7 @@ LoginResult DeviceDatabase::validateUser(const QString &username,
     successQ.bindValue(":username", username);
     successQ.exec();
 
-    return LoginResult::Success;
+    return Model::LoginResult::Success;
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,11 +1169,11 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(newDeviceId);
             q.addBindValue(obj[QLatin1String("tagName")].toString());
-            q.addBindValue(obj[QLatin1String("address")].toInt());
+            q.addBindValue(obj[QLatin1String("localAddress")].toInt());       // TODO: rename DB column address -> local_address
             q.addBindValue(obj[QLatin1String("type")].toString());
             q.addBindValue(obj[QLatin1String("readOnly")].toBool(true) ? 1 : 0);
             q.addBindValue(obj[QLatin1String("length")].toInt(1));
-            q.addBindValue(obj[QLatin1String("unifiedRegisterId")].toInt(-1));
+            q.addBindValue(obj[QLatin1String("unifiedAddress")].toInt(-1));   // TODO: rename DB column unified_register_id -> unified_address
             q.addBindValue(obj[QLatin1String("displayName")].toString());
             q.addBindValue(obj[QLatin1String("unit")].toString());
             q.addBindValue(obj[QLatin1String("scale")].toDouble(1.0));

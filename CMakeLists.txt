@@ -95,7 +95,6 @@ add_executable(swr
   config/AppConfig.h config/AppConfig.cpp
   config/SystemConfig.h config/SystemConfig.cpp
   utils/NetworkConfigurator.h utils/NetworkConfigurator.cpp
-  modbus_server/RegisterAddressMap.h modbus_server/RegisterAddressMap.cpp
   modbus_server/ModbusTcpServer.h modbus_server/ModbusTcpServer.cpp
   maintenance/BackupModels.h
   maintenance/BackupManager.h maintenance/BackupManager.cpp
@@ -142,9 +141,9 @@ install(TARGETS swr
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-option(SR_INIT_SAMPLE_DATA "Insert sample data on startup" OFF)
+option(SR_INIT_DATABASE_SCHEMA "Init data-base schema on startup" OFF)
 
-if(SR_INIT_SAMPLE_DATA)
-    target_compile_definitions(swr PRIVATE SR_INIT_SAMPLE_DATA)
+if(SR_INIT_DATABASE_SCHEMA)
+    target_compile_definitions(swr PRIVATE SR_INIT_DATABASE_SCHEMA)
 endif()
 

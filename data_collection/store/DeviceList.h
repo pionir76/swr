@@ -21,7 +21,7 @@ public:
     Model::DeviceInfo get(int deviceId) const;
     QList<Model::DeviceInfo> getAll() const;
     Model::RegisterConfig findByRegisterId(int id, bool &found) const;
-    Model::RegisterConfig findByUnifiedId(int unifiedId, bool &found) const;
+    Model::RegisterConfig findByUnifiedAddress(int unifiedAddress, bool &found) const;
 
     void enqueueWrite(int deviceId, Model::WriteRequest req);
     QList<Model::WriteRequest> takeWrites(int deviceId);

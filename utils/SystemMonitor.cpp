@@ -5,6 +5,7 @@
 #include <QTimer>
 
 #include <sys/statvfs.h>
+#include <sys/timex.h>
 
 namespace Util {
 
@@ -69,6 +70,7 @@ void SystemMonitor::sample()
     readMemory(res);
     readDisks(res);
     readNetwork(res);
+    res.ntp = readNtpStatus();
 
     QMutexLocker lock(&m_mutex);
     m_cache = res;
@@ -108,6 +110,35 @@ qint64 SystemMonitor::readUptime()
         return 0;
     return static_cast<qint64>(
         f.readAll().trimmed().split(' ').first().toDouble());
+}
+
+NtpStatus SystemMonitor::readNtpStatus()
+{
+    struct timex tx = {};
+    ::adjtimex(&tx);
+
+    //---------------------------------------------------------------------------//
+    // STA_UNSYNC Bit (0x0040) indicates whether the system clock is synchronized with an NTP server.
+    // Call Adjtimex() to get the current status of the system clock. 
+    // The STA_UNSYNC bit is set if the clock is not synchronized, and cleared if it is synchronized.
+    //
+    // tx.maxerror : max error (µs) is a measure of the maximum error in microseconds. 
+    // It indicates the estimated maximum error of the system clock relative to the reference clock.
+    //
+    // just right after synchronization:     maxerror small  (tens of µs)
+    // not synchronized:     maxerror continues to increase (kernel increases by 512µs every 16 seconds)
+    // threshold exceeded 16000000µs: STA_UNSYNC bit automatically set
+    //
+    // STA_UNSYNC = 1  →  Not Synced (Kernel Status)
+    // STA_UNSYNC = 0  →  Synced (Kernel Status)
+    // STA_UNSYNC Bit (0x0040)
+    //---------------------------------------------------------------------------//
+
+    NtpStatus s;
+    s.synced     = !(tx.status & 0x0040);              
+    s.maxErrorMs = static_cast<int>(tx.maxerror / 1000);
+    
+    return s;
 }
 
 // ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ private:
     Model::DeviceConnection m_connection;
     QTcpSocket m_socket;
     quint16 m_transactionId = 1;
-    QString m_lastError;
+    mutable QString m_lastError;
 };
 
 } // namespace Comm

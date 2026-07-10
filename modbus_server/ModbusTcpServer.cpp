@@ -1,59 +1,78 @@
 #include "ModbusTcpServer.h"
-#include "RegisterAddressMap.h"
 
-// TODO: 실제 구현 필요
-//
-// [start()]
-//   - QModbusTcpServer 인스턴스 생성
-//   - setServerAddress(slaveId) 설정
-//   - connectDevice() → 포트 바인딩
-//   - dataWritten 시그널 → onDataWritten 슬롯 연결
-//   - RegisterAddressMap::load() 후 syncDefaults() 호출
-//
-// [stop()]
-//   - disconnectDevice() 후 m_server 해제
-//
-// [onDataWritten()]
-//   - address → RegisterAddressMap::unifiedIdFromAddress() → unifiedId
-//   - DeviceList에서 해당 unifiedId의 RegisterConfig 조회
-//   - readOnly 체크 → 위반 시 Modbus Exception 응답 (QModbusTcpServer API 확인 필요)
-//   - PollingManager::requestWrite() 호출로 실제 장비에 전파
-//
-// [syncReadData()]
-//   - RegisterTable::unifiedRegister(id)로 현재 scaledValue 읽기
-//   - QModbusTcpServer::setData()로 서버 내부 레지스터 갱신
-//   - scaledValue → quint16 변환 시 scale 역산 필요 (rawRegisters 사용 권장)
-//
-// [통합 레지스터 타입 정책]
-//   모든 통합 레지스터는 Holding Register(FC03)로 단일 노출.
-//   비트형(rawCoils): false → 0x0000, true → 0x0001 로 변환 후 setData()
-//   워드형(rawRegisters): 값 그대로 setData()
-//   readOnly == true인 레지스터의 쓰기 요청 → Exception Code 0x01 응답
-//
-// [읽기 시점]
-//   QModbusTcpServer는 내부에 레지스터 이미지를 유지하며 마스터 요청에 자동 응답한다.
-//   RegisterTable의 최신 값을 반영하기 위해 다음 두 가지 방식 중 선택:
-//     A) 폴링 완료 시마다 RegisterTable → QModbusTcpServer 동기화 (push)
-//     B) QModbusTcpServer의 modbusServerRead 신호에서 직전 값 동기화 (pull on demand)
-//   → A 방식 권장 (구현 단순, 항상 최신 값 유지)
-//
-// [포트 502 주의]
-//   Linux에서 1024 미만 포트는 root 권한 필요.
-//   배포 환경에서 cap_net_bind_service 부여 또는 iptables REDIRECT로 고포트 → 502 전환 고려.
+#include <QModbusTcpServer>
+#include <QModbusDataUnit>
+#include <QtNetwork/QTcpSocket>
+#include <QtCore/QSet>
+
+#include "../data_collection/store/RegisterTable.h"
+#include "../data_collection/store/DeviceList.h"
+#include "../data_collection/model/DeviceModels.h"
+#include "../data_collection/model/UnifiedRegister.h"
 
 namespace ModbusServer {
 
+// ---------------------------------------------------------------------------
+// Internal subclass of QModbusTcpServer to override readData() for unifiedAddress mapping.
+// Implements QModbusTcpConnectionObserver to track connected clients.
+// ---------------------------------------------------------------------------
+class ModbusServerImpl : public QModbusTcpServer,
+                         public QModbusTcpConnectionObserver
+{
+    Q_OBJECT
+public:
+    explicit ModbusServerImpl(QObject *parent = nullptr)
+        : QModbusTcpServer(parent) {}
+
+    std::function<quint16(int)> readFn;  // addr(=unifiedAddress) → raw quint16
+
+    bool readData(QModbusDataUnit *unit) const override
+    {
+        if (!unit || !readFn) return false;
+        for (int i = 0; i < static_cast<int>(unit->valueCount()); ++i)
+            unit->setValue(i, readFn(unit->startAddress() + i));
+        return true;
+    }
+
+    bool acceptNewConnection(QTcpSocket *newClient) override
+    {
+        m_clients.insert(newClient);
+        emit clientConnected(newClient->peerAddress().toString());
+        return true;
+    }
+
+    void removeClient(QTcpSocket *socket)
+    {
+        m_clients.remove(socket);
+    }
+
+    int connectionCount() const { return m_clients.size(); }
+
+    QStringList connectedIps() const
+    {
+        QStringList ips;
+        for (const QTcpSocket *s : m_clients)
+            ips.append(s->peerAddress().toString());
+        return ips;
+    }
+
+signals:
+    void clientConnected(const QString &ip);
+
+private:
+    QSet<QTcpSocket *> m_clients;
+};
+
+// ---------------------------------------------------------------------------
+// ModbusTcpServer
+// ---------------------------------------------------------------------------
 ModbusTcpServer::ModbusTcpServer(
     std::shared_ptr<DataCollection::Store::RegisterTable> registerTable,
     std::shared_ptr<DataCollection::Store::DeviceList>    deviceList,
-    DataCollection::Polling::PollingManager               *pollingManager,
-    DataCollection::Database::DeviceDatabase              *db,
     QObject *parent)
     : QObject(parent)
     , m_registerTable(std::move(registerTable))
     , m_deviceList(std::move(deviceList))
-    , m_pollingManager(pollingManager)
-    , m_addressMap(std::make_unique<RegisterAddressMap>(db))
 {
 }
 
@@ -64,51 +83,144 @@ ModbusTcpServer::~ModbusTcpServer()
 
 bool ModbusTcpServer::start(quint16 port, int slaveId, QString &error)
 {
-    Q_UNUSED(port)
-    Q_UNUSED(slaveId)
-    Q_UNUSED(error)
-    // TODO
-    return false;
+    if (m_server) {
+        error = QStringLiteral("Modbus server is already running");
+        return false;
+    }
+
+    //---------------------------------------------------------------------------//
+    // Calculate the maximum unifiedAddress based on DeviceList
+    // Determine HoldingRegister block range
+    //---------------------------------------------------------------------------//
+    int maxId = 100;
+    for (const auto &device : m_deviceList->getAll())
+        for (const auto &reg : device.registers)
+            if (reg.unifiedAddress > maxId)
+                maxId = reg.unifiedAddress;
+
+    auto *server = new ModbusServerImpl(this);
+
+    //---------------------------------------------------------------------------//
+    // addr(=unifiedAddress) → quint16 raw value
+    //   Coil/DiscreteInput : rawCoils[0]    → false=0x0000 / true=0x0001
+    //   HoldingRegister/InputRegister : rawRegisters[0]
+    //---------------------------------------------------------------------------//
+    server->readFn = [this](int addr) -> quint16 {
+        using RT = DataCollection::Model::RegisterType;
+        const auto state = m_registerTable->state(addr);
+        if (state.config.unifiedAddress < 0)
+            return 0;
+        if (state.config.type == RT::Coil || state.config.type == RT::DiscreteInput)
+            return (!state.rawCoils.isEmpty() && state.rawCoils.first()) ? 0x0001 : 0x0000;
+        return state.rawRegisters.isEmpty() ? 0 : state.rawRegisters.first();
+    };
+
+    //---------------------------------------------------------------------------//
+    // HoldingRegister Data block (If asking out of bounds qt answer as 0x02)
+    //---------------------------------------------------------------------------//
+    QModbusDataUnitMap regMap;
+    regMap.insert(QModbusDataUnit::HoldingRegisters,
+                  { QModbusDataUnit::HoldingRegisters, 0, static_cast<quint16>(maxId + 1) });
+    server->setMap(regMap);
+
+    server->setServerAddress(slaveId);
+    server->setConnectionParameter(QModbusDevice::NetworkPortParameter,    port);
+    server->setConnectionParameter(QModbusDevice::NetworkAddressParameter, QStringLiteral("0.0.0.0"));
+
+    connect(server, &QModbusServer::dataWritten,
+            this,   &ModbusTcpServer::onDataWritten);
+
+    connect(server, &QModbusDevice::errorOccurred,
+            this, [this, server](QModbusDevice::Error) {
+                emit serverError(server->errorString());
+            });
+
+    //---------------------------------------------------------------------------//
+    // Track connected clients via QModbusTcpConnectionObserver.
+    // acceptNewConnection() fires on connect, modbusClientDisconnected on disconnect.
+    //---------------------------------------------------------------------------//
+    connect(server, &ModbusServerImpl::clientConnected,
+            this, [this](const QString &ip) {
+                emit clientConnected(ip);
+                emit connectionCountChanged(connectionCount());
+            });
+
+    connect(server, &QModbusTcpServer::modbusClientDisconnected,
+            this, [this, server](QTcpSocket *socket) {
+                const QString ip = socket->peerAddress().toString();
+                server->removeClient(socket);
+                emit clientDisconnected(ip);
+                emit connectionCountChanged(connectionCount());
+            });
+
+    server->installConnectionObserver(server);
+
+    if (!server->connectDevice()) {
+        error = server->errorString();
+        delete server;
+        return false;
+    }
+
+    m_server  = server;
+    m_port    = port;
+    m_slaveId = slaveId;
+    return true;
 }
 
 void ModbusTcpServer::stop()
 {
-    // TODO
+    if (!m_server) return;
+    m_server->disconnectDevice();
+    delete m_server;
+    m_server = nullptr;
 }
 
 bool ModbusTcpServer::isRunning() const
 {
-    // TODO
-    return false;
+    return m_server && m_server->state() == QModbusDevice::ConnectedState;
 }
 
-quint16 ModbusTcpServer::port() const    { return m_port; }
+quint16 ModbusTcpServer::port()    const { return m_port; }
 int     ModbusTcpServer::slaveId() const { return m_slaveId; }
 
 int ModbusTcpServer::connectionCount() const
 {
-    // TODO
-    return 0;
+    if (!m_server) return 0;
+    return static_cast<ModbusServerImpl *>(m_server)->connectionCount();
 }
 
-RegisterAddressMap *ModbusTcpServer::addressMap() const
+QStringList ModbusTcpServer::connectedClients() const
 {
-    return m_addressMap.get();
+    if (!m_server) return {};
+    return static_cast<ModbusServerImpl *>(m_server)->connectedIps();
 }
 
 void ModbusTcpServer::onDataWritten(QModbusDataUnit::RegisterType table, int address, int size)
 {
     Q_UNUSED(table)
-    Q_UNUSED(address)
-    Q_UNUSED(size)
-    // TODO
-}
 
-void ModbusTcpServer::syncReadData(int address, int size)
-{
-    Q_UNUSED(address)
-    Q_UNUSED(size)
-    // TODO
+    //-----------------------------------------------------------//
+    // readOnly already blocked by setData() override where readOnly is 
+    // already blocked, so only propagation is performed
+    //-----------------------------------------------------------//
+    QModbusDataUnit unit(QModbusDataUnit::HoldingRegisters, address, static_cast<quint16>(size));
+    if (!m_server->data(&unit)) return;
+
+    for (int i = 0; i < size; ++i) {
+        const int unifiedId = address + i;
+        bool found = false;
+        const auto config = m_deviceList->findByUnifiedAddress(unifiedId, found);
+        if (!found || config.readOnly) continue;
+
+        DataCollection::Model::WriteRequest req;
+        req.config    = config;
+        req.rawValues = { unit.value(i) };
+
+        m_deviceList->enqueueWrite(config.deviceId, req);
+        emit writeRequested(unifiedId, static_cast<double>(unit.value(i)));
+    }
 }
 
 } // namespace ModbusServer
+
+#include "ModbusTcpServer.moc"

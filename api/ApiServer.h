@@ -21,6 +21,7 @@ public:
                        std::shared_ptr<DataCollection::Store::RegisterTable> registerTable,
                        std::shared_ptr<DataCollection::Store::DeviceList> deviceList,
                        DataCollection::Polling::PollingManager *pollingManager,
+                       Util::SystemMonitor *systemMonitor,
                        QObject *parent = nullptr);
 
     ~ApiServer() override;

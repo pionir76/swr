@@ -15,8 +15,10 @@ SerialBus::SerialBus(const Rs485Config &cfg)
 
 bool SerialBus::open(QString &error)
 {
-    if (m_port.isOpen())
+    if (m_port.isOpen()){
         return true;
+    }
+        
     if (!m_port.open(QIODevice::ReadWrite)) {
         error = QStringLiteral("SerialBus: failed to open %1 — %2")
                     .arg(m_port.portName(), m_port.errorString());
@@ -27,8 +29,9 @@ bool SerialBus::open(QString &error)
 
 void SerialBus::close()
 {
-    if (m_port.isOpen())
+    if (m_port.isOpen()){
         m_port.close();
+    }
 }
 
 bool SerialBus::isOpen() const

@@ -81,9 +81,9 @@ QList<Model::DeviceInfo> DeviceList::getAll() const
 }
 
 //-----------------------------------------------------------------------------------//
-// Find a register config by its database ID (id) or unified ID (unifiedRegisterId).
-// It's OK register ID is unique across devices, 
-// but unifiedRegisterId is unique across all devices.
+// Find a register config by its database ID (id) or unified address (unifiedAddress).
+// It's OK register ID is unique across devices,
+// but unifiedAddress is unique across all devices.
 //-----------------------------------------------------------------------------------//
 Model::RegisterConfig DeviceList::findByRegisterId(int id, bool &found) const
 {
@@ -101,13 +101,13 @@ Model::RegisterConfig DeviceList::findByRegisterId(int id, bool &found) const
     return {};
 }
 
-Model::RegisterConfig DeviceList::findByUnifiedId(int unifiedId, bool &found) const
+Model::RegisterConfig DeviceList::findByUnifiedAddress(int unifiedAddress, bool &found) const
 {
     QMutexLocker locker(&m_mutex);
 
     for (const Model::DeviceInfo &device : m_devices) {
         for (const Model::RegisterConfig &f : device.registers) {
-            if (f.unifiedRegisterId == unifiedId) {
+            if (f.unifiedAddress == unifiedAddress) {
                 found = true;
                 return f;
             }

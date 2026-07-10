@@ -8,6 +8,19 @@ namespace Comm {
 
 class IDeviceClient {
 public:
+    //---------------------------------------------------------------------------------------------------------//
+    // Virtual destructor to ensure proper cleanup of derived classes
+    // This is important for polymorphic base classes to avoid undefined behavior (UB)
+    //
+    // IDeviceClient* client = new ModbusRTUClient(conn, bus); 
+    // delete client;
+    //
+    // In this case, the destructor of ModbusRTUClient will be called, ensuring that any resources allocated by the derived class are properly released.
+    // ModbusRTUClient::~ModbusRTUClient()  <-- Naver call this without a virtual destructor in the base class
+    //
+    // So, If no defalut virtual destructor, the derived class destructor will not be called, 
+    // leading to resource leaks and undefined behavior.
+    //---------------------------------------------------------------------------------------------------------//
     virtual ~IDeviceClient() = default;
 
     virtual bool connect() = 0;

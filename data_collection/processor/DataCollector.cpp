@@ -60,7 +60,7 @@ QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
         if (ra.type != rb.type){
             return static_cast<int>(ra.type) < static_cast<int>(rb.type);
         }
-        return ra.address < rb.address;
+        return ra.localAddress < rb.localAddress;
     });
 
     QList<RegisterBatch> batches;
@@ -72,7 +72,7 @@ QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
         if (!batches.isEmpty()) {
             const RegisterBatch &last = batches.last();
             canMerge = (last.type == config.type)
-                    && (config.address == last.startAddress + last.totalLength)
+                    && (config.localAddress == last.startAddress + last.totalLength)
                     && (last.totalLength + config.length <= Comm::RegisterExecutor::MAX_READ_QUANTITY);
         }
 
@@ -82,7 +82,7 @@ QList<DataCollector::RegisterBatch> DataCollector::buildBatches() const
             last.totalLength += config.length;
         } else {
             RegisterBatch batch;
-            batch.startAddress = config.address;
+            batch.startAddress = config.localAddress;
             batch.totalLength  = config.length;
             batch.type         = config.type;
             batch.slices.append({i, 0, config.length});
@@ -173,10 +173,10 @@ void DataCollector::flushWrites()
                 //-------------------------------------------//
                 m_deviceList->enqueueWrite(m_device.id, std::move(retry));
                 qWarning("flushWrites: write failed, retrying (%d left) [device %d, addr %d]: %s",
-                         req.retryCount - 1, m_device.id, req.config.address, qPrintable(error));
+                         req.retryCount - 1, m_device.id, req.config.localAddress, qPrintable(error));
             } else {
                 qWarning("flushWrites: write failed, no retries left [device %d, addr %d]: %s",
-                         m_device.id, req.config.address, qPrintable(error));
+                         m_device.id, req.config.localAddress, qPrintable(error));
             }
         }
     }

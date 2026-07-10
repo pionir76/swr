@@ -1,6 +1,6 @@
 #include "ModbusASCIIClient.h"
-
 #include <QString>
+#include <QDebug>
 
 namespace DataCollection {
 namespace Comm {
@@ -214,6 +214,7 @@ bool ModbusASCIIClient::sendRequest(const QByteArray &request,
                                     QString &error)
 {
     m_bus.clearBuffers();
+    qDebug() << request;
 
     const qint64 written = m_bus.write(request);
     if (written != request.size() ||
@@ -230,8 +231,9 @@ bool ModbusASCIIClient::sendRequest(const QByteArray &request,
     }
 
     QByteArray response = m_bus.readAll();
-    while (m_bus.waitForReadyRead(50))
+    while (m_bus.waitForReadyRead(200)){
         response.append(m_bus.readAll());
+    }
 
     return parseAsciiFrame(response, responsePdu, error);
 }
@@ -243,7 +245,7 @@ bool ModbusASCIIClient::parseAsciiFrame(const QByteArray &frame,
     const int start = frame.indexOf(':');
     const int end   = frame.indexOf("\r\n", start >= 0 ? start : 0);
     if (start < 0 || end < 0) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("ASCII response framing error");
         error = m_lastError;
         return false;
@@ -251,7 +253,7 @@ bool ModbusASCIIClient::parseAsciiFrame(const QByteArray &frame,
 
     const QByteArray payload = frame.mid(start + 1, end - start - 1);
     if (payload.size() % 2 != 0) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("ASCII invalid hex length");
         error = m_lastError;
         return false;
@@ -259,7 +261,7 @@ bool ModbusASCIIClient::parseAsciiFrame(const QByteArray &frame,
 
     const QByteArray raw = QByteArray::fromHex(payload);
     if (raw.size() < 3) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("ASCII response too short");
         error = m_lastError;
         return false;
@@ -268,7 +270,7 @@ bool ModbusASCIIClient::parseAsciiFrame(const QByteArray &frame,
     const quint8     receivedLrc = static_cast<quint8>(raw.at(raw.size() - 1));
     const QByteArray data        = raw.left(raw.size() - 1);
     if (lrc(data) != receivedLrc) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("ASCII LRC mismatch");
         error = m_lastError;
         return false;
@@ -283,38 +285,77 @@ bool ModbusASCIIClient::verifyResponse(const QByteArray &responsePdu,
                                        int expectedDataBytes,
                                        QString &error) const
 {
+    //---------------------------------------------------------------------//
+    // responsePdu format:
+    // [0]       [1]           [2]          [3] [4] ...
+    // SlaveID   FunctionCode  ByteCount    Data...
+    //---------------------------------------------------------------------//
     if (responsePdu.size() < 3) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
-            QStringLiteral("ASCII response too short");
+        m_lastError = QStringLiteral("ASCII response too short");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // Verify slave ID matches the requested device
+    //---------------------------------------------------------------------//
+    if (static_cast<quint8>(responsePdu.at(0)) != static_cast<quint8>(m_connection.slaveId)) {
+        m_lastError =
+            QStringLiteral("ASCII slave ID mismatch (expected %1, got %2)")
+                .arg(m_connection.slaveId)
+                .arg(static_cast<quint8>(responsePdu.at(0)));
+        error = m_lastError;
+        return false;
+    }
+
+    //---------------------------------------------------------------------//
+    // Modbus exception response: Sender FC | 0x80, Exception Code
+    // e.g., if the request FC is 0x03, the exception response FC will be 0x83, 
+    // followed by the exception code. 
+    // FC = 0x03  →  error response FC = 0x83
+    // FC = 0x06  →  error response FC = 0x86
+    //---------------------------------------------------------------------//
     const quint8 functionCode = static_cast<quint8>(responsePdu.at(1));
     if (functionCode == static_cast<quint8>(expectedFunction | 0x80)) {
+
+        // Exception Code : responsePdu[2]
+        // 0x01	Illegal Function
+        // 0x02	Illegal Data Address
+        // 0x03	Illegal Data Value
+        // 0x04	Slave Device Failure
         const quint8 exceptionCode = static_cast<quint8>(responsePdu.at(2));
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("Modbus exception %1").arg(exceptionCode);
         error = m_lastError;
         return false;
     }
 
     if (functionCode != expectedFunction) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
-            QStringLiteral("ASCII function code mismatch");
+        m_lastError = QStringLiteral("ASCII function code mismatch");
         error = m_lastError;
         return false;
     }
 
+    //---------------------------------------------------------------------//
+    // Check the byte count for read functions (0x01, 0x03) 
+    // or the response length for write functions
+    //---------------------------------------------------------------------//
     if (expectedFunction == 0x01 || expectedFunction == 0x03) {
         if (static_cast<quint8>(responsePdu.at(2)) != expectedDataBytes) {
-            const_cast<ModbusASCIIClient *>(this)->m_lastError =
-                QStringLiteral("ASCII byte count mismatch");
+            m_lastError = QStringLiteral("ASCII byte count mismatch");
+            error = m_lastError;
+            return false;
+        }
+        //---------------------------------------------------------------------//
+        // Verify actual buffer holds enough bytes beyond the header
+        //---------------------------------------------------------------------//
+        if (responsePdu.size() < 3 + expectedDataBytes) {
+            m_lastError = QStringLiteral("ASCII response buffer too short");
             error = m_lastError;
             return false;
         }
     } else if (expectedDataBytes >= 0 && (responsePdu.size() - 2) != expectedDataBytes) {
-        const_cast<ModbusASCIIClient *>(this)->m_lastError =
+        m_lastError =
             QStringLiteral("ASCII response length mismatch");
         error = m_lastError;
         return false;

@@ -9,7 +9,7 @@ namespace DataCollection {
 namespace Model {
 
 //-----------------------------------------------------------//
-// range of unifiedRegisterId 
+// range of unifiedAddress
 // auto assigned: 1 ~ kAutoUnifiedIdMax
 // manually assigned: kManualUnifiedIdMin ~ 4999
 //-----------------------------------------------------------//
@@ -38,11 +38,11 @@ struct RegisterConfig {
     QString         tagName;
     QString         displayName;
 
-    int             address = 0;
+    int             localAddress = 0;
+    int             unifiedAddress = -1;
     RegisterType    type = RegisterType::Unknown;
     bool            readOnly = false;
     int             length = 1;
-    int             unifiedRegisterId = -1;
     QString         unit;
 
     double          scale = 1.0;
@@ -126,6 +126,14 @@ enum class UserStatus {
     Locked
 };
 
+enum class LoginResult {
+    Success,
+    InvalidCredentials,
+    AccountDisabled,
+    AccountLocked,
+    AccountJustLocked
+};
+
 struct UserInfo
 {
     int id = -1;
@@ -158,7 +166,7 @@ struct LoginHistoryEntry {
     QString timestamp;
     QString username;
     QString action;   // "login" | "logout"
-    QString result;   // "success" | "fail"
+    QString result;   // "success" | "invalid_password" | "account_locked" | "account_disabled"
     QString ip;
 };
 

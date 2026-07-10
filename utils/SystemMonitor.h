@@ -11,6 +11,11 @@ class QTimer;
 
 namespace Util {
 
+struct NtpStatus {
+    bool synced     = false;
+    int  maxErrorMs = 0;    // adjtimex maxerror (µs → ms)
+};
+
 struct CpuStat {
     qint64 user    = 0;
     qint64 nice    = 0;
@@ -57,6 +62,7 @@ struct SystemResources {
 
     qint64    uptimeSeconds = 0;
     QDateTime cachedAt;
+    NtpStatus ntp;
 };
 
 class SystemMonitor : public QObject
@@ -74,9 +80,10 @@ private slots:
     void sample();
 
 private:
-    static CpuStat readCpuStat();
-    static double  readTemperature();
-    static qint64  readUptime();
+    static CpuStat   readCpuStat();
+    static double    readTemperature();
+    static qint64    readUptime();
+    static NtpStatus readNtpStatus();
     void           readMemory(SystemResources &res) const;
     void           readDisks(SystemResources &res) const;
     void           readNetwork(SystemResources &res) const;

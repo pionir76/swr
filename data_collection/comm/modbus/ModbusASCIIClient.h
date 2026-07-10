@@ -19,17 +19,23 @@ public:
     void disconnect() override { }
     bool isConnected() const override { return m_bus.isOpen(); }
 
-    bool readWords(int address, int count,
-                   QVector<quint16> &out, QString &error) override;
+    bool readWords( int address, 
+                    int count,
+                    QVector<quint16> &out, 
+                    QString &error) override;
 
-    bool readBits(int address, int count,
-                  QVector<bool> &out, QString &error) override;
+    bool readBits(  int address, 
+                    int count,
+                    QVector<bool> &out, 
+                    QString &error) override;
 
     bool writeWords(int address,
-                    const QVector<quint16> &values, QString &error) override;
+                    const QVector<quint16> &values, 
+                    QString &error) override;
 
     bool writeBits(int address,
-                   const QVector<bool> &values, QString &error) override;
+                   const QVector<bool> &values, 
+                   QString &error) override;
 
     QString errorString() const override;
 
@@ -50,7 +56,7 @@ private:
 
     Model::DeviceConnection m_connection;
     SerialBus &m_bus;
-    QString    m_lastError;
+    mutable QString m_lastError;
 };
 
 } // namespace Comm

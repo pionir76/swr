@@ -49,11 +49,11 @@ bool RegisterExecutor::readField(const Model::RegisterConfig &config,
     switch (config.type) {
     case Model::RegisterType::Coil:
     case Model::RegisterType::DiscreteInput:
-        return m_client->readBits(config.address, config.length, coilValues, error);
+        return m_client->readBits(config.localAddress, config.length, coilValues, error);
 
     case Model::RegisterType::HoldingRegister:
     case Model::RegisterType::InputRegister:
-        if (!m_client->readWords(config.address, config.length, registerValues, error)) {
+        if (!m_client->readWords(config.localAddress, config.length, registerValues, error)) {
             return false;
         }
         registerValues = applyByteOrder(registerValues, effectiveByteOrder(config));
@@ -92,7 +92,7 @@ bool RegisterExecutor::writeField(const Model::RegisterConfig &config,
             error = QStringLiteral("Bit value count does not match register length for %1").arg(config.tagName);
             return false;
         }
-        return m_client->writeBits(config.address, coilValues, error);
+        return m_client->writeBits(config.localAddress, coilValues, error);
     }
 
     case Model::RegisterType::HoldingRegister:{
@@ -101,7 +101,7 @@ bool RegisterExecutor::writeField(const Model::RegisterConfig &config,
             return false;
         }
         const QVector<quint16> ordered = applyByteOrder(registerValues, effectiveByteOrder(config));
-        return m_client->writeWords(config.address, ordered, error);
+        return m_client->writeWords(config.localAddress, ordered, error);
     }
 
     default:

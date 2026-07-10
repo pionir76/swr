@@ -28,7 +28,7 @@ void RegisterTable::updateState(const Model::RegisterConfig &config,
                                 int pollingIntervalMs)
 {
     QMutexLocker locker(&m_mutex);
-    const int unifiedId = config.unifiedRegisterId;
+    const int unifiedId = config.unifiedAddress;
 
     // DB-assigned IDs are always >= 0
     if (unifiedId < 0){

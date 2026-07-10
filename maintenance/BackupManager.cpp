@@ -221,11 +221,11 @@ QByteArray BackupManager::buildRegisters(const DataCollection::Database::DeviceD
             obj[QLatin1String("deviceId")]          = d.id;
             obj[QLatin1String("tagName")]            = f.tagName;
             obj[QLatin1String("displayName")]        = f.displayName;
-            obj[QLatin1String("address")]            = f.address;
+            obj[QLatin1String("localAddress")]       = f.localAddress;
             obj[QLatin1String("type")]               = registerTypeToString(f.type);
             obj[QLatin1String("readOnly")]           = f.readOnly;
             obj[QLatin1String("length")]             = f.length;
-            obj[QLatin1String("unifiedRegisterId")]  = f.unifiedRegisterId;
+            obj[QLatin1String("unifiedAddress")]     = f.unifiedAddress;
             obj[QLatin1String("unit")]               = f.unit;
             obj[QLatin1String("scale")]              = f.scale;
             obj[QLatin1String("isSigned")]           = f.isSigned;

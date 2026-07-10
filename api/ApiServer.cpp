@@ -34,16 +34,14 @@ ApiServer::ApiServer(Database::DeviceDatabase *db,
                      std::shared_ptr<Store::RegisterTable> registerTable,
                      std::shared_ptr<Store::DeviceList> deviceList,
                      Polling::PollingManager *pollingManager,
+                     Util::SystemMonitor *systemMonitor,
                      QObject *parent)
     : QObject(parent)
     , m_db(db)
     , m_registerTable(std::move(registerTable))
     , m_deviceList(std::move(deviceList))
     , m_pollingManager(pollingManager)
-    , m_systemMonitor(new Util::SystemMonitor(
-          {QStringLiteral("/"), QStringLiteral("/var")},
-          {QStringLiteral("eth0"), QStringLiteral("eth1")},
-          3, this))
+    , m_systemMonitor(systemMonitor)
 {
 }
 
@@ -141,7 +139,7 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetLogs(req); });
 
 
-    // User — 고정 경로를 <arg> 패턴보다 먼저 등록해야 라우팅 우선순위가 올바르게 적용됨
+    // User  : To Route order being alright Keep order 
     m_server.route("/api/users", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetUsers(req); });
     m_server.route("/api/users", QHttpServerRequest::Method::Post,
@@ -154,6 +152,7 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetSecurityPolicy(req); });
     m_server.route("/api/users/security-policy", QHttpServerRequest::Method::Put,
                    [this](const QHttpServerRequest &req) { return handlePutSecurityPolicy(req); });
+
     m_server.route("/api/users/<arg>", QHttpServerRequest::Method::Delete,
                    [this](const QString &username, const QHttpServerRequest &req) {
                        return handleDeleteUser(req, username); });
@@ -281,8 +280,9 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
 
-    if (!doc.isObject())
+    if (!doc.isObject()){
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+    }
 
     const QJsonObject body = doc.object();
     const QString username = body.value("username").toString();
@@ -292,55 +292,73 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
     const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
 
     QString dbError;
-    const DataCollection::Database::LoginResult result =
+    const Model::LoginResult result =
         m_db->validateUser(username, 
                         password, 
                         ip,
                         cfg.loginSecurity.maxFailedAttempts, 
                         dbError);
 
-    Model::LoginHistoryEntry hist;
+    using LR = Model::LoginResult;
 
+    Model::LoginHistoryEntry hist;
     hist.username = username;
     hist.action   = QStringLiteral("login");
-    hist.result   = (result == DataCollection::Database::LoginResult::Success) ? QStringLiteral("success") : QStringLiteral("fail");
     hist.ip       = ip;
 
-    QString histError;
-    m_db->insertLoginHistory(hist, histError);
-
     switch (result) {
-    case DataCollection::Database::LoginResult::Success: {
+    case LR::Success: {
+        hist.result = QStringLiteral("success");
+        QString histError;
+        m_db->insertLoginHistory(hist, histError);
+
         const QString token = createSession(username);
-        
         Util::Logger::info(QStringLiteral("User logged in: %1 from %2").arg(username, ip));
         QJsonObject resp;
         resp[QLatin1String("token")] = token;
-
         return QHttpServerResponse(resp);
     }
-    case DataCollection::Database::LoginResult::AccountDisabled: {
-        Util::Logger::warning(QStringLiteral("Login denied (disabled): %1 from %2").arg(username, ip));
+    case LR::AccountDisabled: {
+        hist.result = QStringLiteral("account_disabled");
+        QString histError;
+        m_db->insertLoginHistory(hist, histError);
 
+        Util::Logger::warning(QStringLiteral("Login denied (disabled): %1 from %2").arg(username, ip));
         QJsonObject err;
         err[QLatin1String("error")]  = QStringLiteral("Account is disabled.");
         err[QLatin1String("reason")] = QStringLiteral("disabled");
-        
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
-    case DataCollection::Database::LoginResult::AccountLocked: {
-        Util::Logger::warning(QStringLiteral("Login denied (locked): %1 from %2").arg(username, ip));
+    case LR::AccountLocked: {
+        hist.result = QStringLiteral("account_locked");
+        QString histError;
+        m_db->insertLoginHistory(hist, histError);
 
+        Util::Logger::warning(QStringLiteral("Login denied (locked): %1 from %2").arg(username, ip));
         QJsonObject err;
         err[QLatin1String("error")]  = QStringLiteral("Account is locked. Contact administrator.");
         err[QLatin1String("reason")] = QStringLiteral("locked");
-
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
     }
-    default:
-        Util::Logger::warning(QStringLiteral("Login failed (bad credentials): %1 from %2").arg(username, ip));
+    case LR::AccountJustLocked: {
+        hist.result = QStringLiteral("account_locked");
+        QString histError;
+        m_db->insertLoginHistory(hist, histError);
 
+        Util::Logger::warning(QStringLiteral("Account locked: %1 from %2 (max attempts reached)").arg(username, ip));
+        QJsonObject err;
+        err[QLatin1String("error")]  = QStringLiteral("Account is locked. Contact administrator.");
+        err[QLatin1String("reason")] = QStringLiteral("locked");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Forbidden);
+    }
+    default: {
+        hist.result = QStringLiteral("invalid_password");
+        QString histError;
+        m_db->insertLoginHistory(hist, histError);
+
+        Util::Logger::warning(QStringLiteral("Login failed (bad credentials): %1 from %2").arg(username, ip));
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
+    }
     }
 }
 
@@ -468,11 +486,11 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         }
 
         QJsonObject obj;
-        obj["id"]           = r.config.unifiedRegisterId;
+        obj["id"]           = r.config.unifiedAddress;
         obj["tagName"]      = r.config.tagName;
         obj["displayName"]  = r.config.displayName;
         obj["deviceId"]     = r.config.deviceId;
-        obj["address"]      = r.config.address;
+        obj["localAddress"] = r.config.localAddress;
         obj["sourceType"]   = Model::registerTypeToString(r.config.type);
         obj["unit"]         = r.config.unit;
         obj["scaledValue"]  = r.scaledValue;
@@ -632,7 +650,9 @@ QHttpServerResponse ApiServer::handleGetDeviceStatus(const QHttpServerRequest &r
 
 QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &request)
 {
-    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)){
+        return std::move(*err);
+    }
 
     QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
 
@@ -642,11 +662,14 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
     }
 
     const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    if (!doc.isObject())
+
+    if (!doc.isObject()){
         return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+    }
 
     const QJsonObject body = doc.object();
     const QString name = body.value("name").toString().trimmed();
+    
     if (name.isEmpty()) {
         QJsonObject err;
         err["error"] = QStringLiteral("name is required");
@@ -827,18 +850,18 @@ QHttpServerResponse ApiServer::handleGetRegisters(const QHttpServerRequest &requ
         obj["id"]          = f.id;
         obj["tagName"]     = f.tagName;
         obj["displayName"] = f.displayName;
-        obj["address"]     = f.address;
-        obj["type"]        = Model::registerTypeToString(f.type);
-        obj["readOnly"]    = f.readOnly;
-        obj["length"]      = f.length;
-        obj["unit"]        = f.unit;
-        obj["scale"]       = f.scale;
-        obj["isSigned"]    = f.isSigned;
-        obj["bitLabels"]   = f.bitLabels;
-        obj["minValue"]    = f.minValue;
-        obj["maxValue"]    = f.maxValue;
-        obj["byteOrder"]          = Model::byteOrderToString(f.byteOrder);
-        obj["unifiedRegisterId"]  = f.unifiedRegisterId;
+        obj["localAddress"]    = f.localAddress;
+        obj["type"]            = Model::registerTypeToString(f.type);
+        obj["readOnly"]        = f.readOnly;
+        obj["length"]          = f.length;
+        obj["unit"]            = f.unit;
+        obj["scale"]           = f.scale;
+        obj["isSigned"]        = f.isSigned;
+        obj["bitLabels"]       = f.bitLabels;
+        obj["minValue"]        = f.minValue;
+        obj["maxValue"]        = f.maxValue;
+        obj["byteOrder"]       = Model::byteOrderToString(f.byteOrder);
+        obj["unifiedAddress"]  = f.unifiedAddress;
 
         arr.append(obj);
     }
@@ -877,7 +900,7 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
     Model::RegisterConfig config;
     config.tagName     = tagName;
     config.displayName = body.value("displayName").toString(tagName);
-    config.address     = body.value("address").toInt(0);
+    config.localAddress = body.value("localAddress").toInt(0);
     config.type        = Model::registerTypeFromString(typeStr);
     config.readOnly    = body.value("readOnly").toBool(false);
     config.length      = body.value("length").toInt(1);
@@ -895,14 +918,14 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
     if (body.contains("maxValue"))
         config.maxValue = body.value("maxValue").toDouble();
 
-    if (body.contains("unifiedRegisterId")) {
-        const int uid = body.value("unifiedRegisterId").toInt(-1);
+    if (body.contains("unifiedAddress")) {
+        const int uid = body.value("unifiedAddress").toInt(-1);
         if (uid >= 0 && uid < Model::kManualUnifiedIdMin) {
             QJsonObject err;
-            err["error"] = QStringLiteral("Manual unifiedRegisterId must be >= %1").arg(Model::kManualUnifiedIdMin);
+            err["error"] = QStringLiteral("Manual unifiedAddress must be >= %1").arg(Model::kManualUnifiedIdMin);
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
-        config.unifiedRegisterId = uid;
+        config.unifiedAddress = uid;
     }
 
     if (config.type == Model::RegisterType::Unknown) {
@@ -917,7 +940,7 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
     if (!syncAddRegister(devId, config, error)) {
         if (error.contains(QLatin1String("UNIQUE"), Qt::CaseInsensitive)) {
             QJsonObject err;
-            err["error"] = QStringLiteral("unifiedRegisterId already in use");
+            err["error"] = QStringLiteral("unifiedAddress already in use");
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
         }
         Util::Logger::error(QStringLiteral("addRegister failed: %1").arg(error));
@@ -930,10 +953,10 @@ QHttpServerResponse ApiServer::handlePostRegister(const QHttpServerRequest &requ
 
     // return the created register ID info in the response
     QJsonObject resp;
-    resp["tagName"]           = config.tagName;
-    resp["address"]           = config.address;
-    resp["type"]              = Model::registerTypeToString(config.type);
-    resp["unifiedRegisterId"] = config.unifiedRegisterId;
+    resp["tagName"]        = config.tagName;
+    resp["localAddress"]   = config.localAddress;
+    resp["type"]           = Model::registerTypeToString(config.type);
+    resp["unifiedAddress"] = config.unifiedAddress;
 
     return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Created);
 }
@@ -980,7 +1003,7 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
     config.deviceId          = existing.deviceId;
     config.tagName           = tagName;
     config.displayName       = body.value("displayName").toString(tagName);
-    config.address           = body.value("address").toInt(existing.address);
+    config.localAddress      = body.value("localAddress").toInt(existing.localAddress);
     config.type              = type;
     config.readOnly          = body.value("readOnly").toBool(existing.readOnly);
     config.length            = body.value("length").toInt(existing.length);
@@ -994,23 +1017,23 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
     config.minValue          = body.contains("minValue") ? body.value("minValue").toDouble() : existing.minValue;
     config.maxValue          = body.contains("maxValue") ? body.value("maxValue").toDouble() : existing.maxValue;
 
-    if (body.contains("unifiedRegisterId")) {
-        const int uid = body.value("unifiedRegisterId").toInt(existing.unifiedRegisterId);
+    if (body.contains("unifiedAddress")) {
+        const int uid = body.value("unifiedAddress").toInt(existing.unifiedAddress);
         if (uid >= 0 && uid < Model::kManualUnifiedIdMin) {
             QJsonObject err;
-            err["error"] = QStringLiteral("Manual unifiedRegisterId must be >= %1").arg(Model::kManualUnifiedIdMin);
+            err["error"] = QStringLiteral("Manual unifiedAddress must be >= %1").arg(Model::kManualUnifiedIdMin);
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
-        config.unifiedRegisterId = uid;
+        config.unifiedAddress = uid;
     } else {
-        config.unifiedRegisterId = existing.unifiedRegisterId;
+        config.unifiedAddress = existing.unifiedAddress;
     }
 
     QString error;
     if (!syncUpdateRegister(config, error)) {
         if (error.contains(QLatin1String("UNIQUE"), Qt::CaseInsensitive)) {
             QJsonObject err;
-            err["error"] = QStringLiteral("unifiedRegisterId already in use");
+            err["error"] = QStringLiteral("unifiedAddress already in use");
             return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Conflict);
         }
         Util::Logger::error(QStringLiteral("updateRegister failed: %1").arg(error));
@@ -1059,7 +1082,7 @@ QHttpServerResponse ApiServer::handleCheckUnifiedId(const QHttpServerRequest &re
     }
 
     bool found = false;
-    m_deviceList->findByUnifiedId(unifiedId, found);
+    m_deviceList->findByUnifiedAddress(unifiedId, found);
 
     QJsonObject resp;
     resp["available"] = !found;
@@ -1149,12 +1172,12 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
 
         QJsonObject obj;
 
-        obj["id"]           = r.config.unifiedRegisterId;
+        obj["id"]           = r.config.unifiedAddress;
         obj["registerId"]   = r.config.id;
         obj["tagName"]      = r.config.tagName;
         obj["displayName"]  = r.config.displayName;
         obj["deviceId"]     = r.config.deviceId;
-        obj["address"]      = r.config.address;
+        obj["localAddress"] = r.config.localAddress;
         obj["sourceType"]   = Model::registerTypeToString(r.config.type);
         obj["unit"]         = r.config.unit;
         obj["scaledValue"]  = r.scaledValue;
@@ -2150,10 +2173,18 @@ QHttpServerResponse ApiServer::handleGetSystemInfo(const QHttpServerRequest &req
     summary[QLatin1String("logCount")]      = logTotal;
     summary[QLatin1String("pollingActive")] = m_pollingManager->isRunning();
 
+    const Util::SystemResources res = m_systemMonitor->resources();
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    QJsonObject ntp;
+    ntp[QLatin1String("server")]     = cfg.system.ntpServer;
+    ntp[QLatin1String("synced")]     = res.ntp.synced;
+    ntp[QLatin1String("maxErrorMs")] = res.ntp.maxErrorMs;
+
     QJsonObject resp;
     resp[QLatin1String("info")]    = info;
     resp[QLatin1String("disk")]    = disk;
     resp[QLatin1String("summary")] = summary;
+    resp[QLatin1String("ntp")]     = ntp;
 
     return QHttpServerResponse(resp);
 }

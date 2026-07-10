@@ -1,6 +1,6 @@
 #include <QCoreApplication>
 #include <QFile>
-#include <QXmlStreamReader>
+#include <QProcess>
 
 #include "config/AppConfig.h"
 #include "config/SystemConfig.h"
@@ -11,6 +11,44 @@
 #include "data_collection/store/DeviceList.h"
 #include "data_collection/polling/PollingManager.h"
 #include "api/ApiServer.h"
+#include "utils/SystemMonitor.h"
+#include "modbus_server/ModbusTcpServer.h"
+
+// ---------------------------------------------------------------------------
+// Apply NTP Config 
+//   replace of /etc/ntp.conf server as config value. and Transmit SIGHUP
+//   (API → Save config → reboot).
+// ---------------------------------------------------------------------------
+static void applyNtpConfig(const QString &ntpServer)
+{
+    if (ntpServer.isEmpty()) return;
+
+    const QString content = QStringLiteral(
+        "driftfile /var/lib/ntp/drift\n"
+        "server %1 iburst\n"
+        "server 127.127.1.0\n"
+        "fudge 127.127.1.0 stratum 14\n"
+        "restrict -4 default notrap nomodify nopeer noquery\n"
+        "restrict -6 default notrap nomodify nopeer noquery\n"
+        "restrict 127.0.0.1\n"
+        "restrict ::1\n"
+    ).arg(ntpServer);
+
+    QFile f(QStringLiteral("/etc/ntp.conf"));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        Util::Logger::error(QStringLiteral("NTP: failed to write /etc/ntp.conf: %1").arg(f.errorString()));
+        return;
+    }
+    f.write(content.toUtf8());
+    f.close();
+
+    // Transmit SIG HUP to ntp -> reload
+    QProcess::startDetached(QStringLiteral("/bin/sh"),
+        { QStringLiteral("-c"),
+          QStringLiteral("kill -HUP $(pidof ntpd) 2>/dev/null || true") });
+
+    Util::Logger::info(QStringLiteral("NTP server applied: %1").arg(ntpServer));
+}
 
 // ---------------------------------------------------------------------------
 // Namespace alias
@@ -46,6 +84,11 @@ int main(int argc, char *argv[])
     if(!Util::Logger::initialize(logDbPath, SR_LOG_PRINT, SR_MAX_LOG_LINES)){
         qWarning() << "Failed to initialize logger:" << logDbPath;
     }
+
+    //-----------------------------------------------------------------//
+    // Apply NTP Server Config & Service Reload
+    //-----------------------------------------------------------------//
+    applyNtpConfig(config.system.ntpServer);
 
     Util::Logger::info(
         QStringLiteral("Application started. Version: %1 Revision: %2 SpecialCode: Z%3 Last Update Date:%4")
@@ -125,7 +168,7 @@ int main(int argc, char *argv[])
     //-----------------------------------------------------------------//
     // To Reset DataBase.
     //-----------------------------------------------------------------//
-#ifdef SR_INIT_SAMPLE_DATA
+#ifdef SR_INIT_DATABASE_SCHEMA
     if (!db.resetSchema(dbError)) {
         Util::Logger::error(QStringLiteral("Failed to reset DB schema: %1").arg(dbError));
         return 1;
@@ -169,13 +212,38 @@ int main(int argc, char *argv[])
     }
 
     //-----------------------------------------------------------------//
+    // Start Modbus TCP Server (if enabled in config)
+    //-----------------------------------------------------------------//
+    ModbusServer::ModbusTcpServer modbusTcpServer(registerTable, deviceList);
+    if (config.modbusServer.enabled) {
+        QString modbusError;
+        if (!modbusTcpServer.start(config.modbusServer.port,
+                                   config.modbusServer.slaveId,
+                                   modbusError)) {
+            Util::Logger::error(QStringLiteral("Failed to start Modbus TCP Server: %1").arg(modbusError));
+        } else {
+            Util::Logger::info(QStringLiteral("Modbus TCP Server started on port %1, slaveId %2")
+                .arg(config.modbusServer.port)
+                .arg(config.modbusServer.slaveId));
+        }
+    }
+
+    //-----------------------------------------------------------------//
+    // System Monitor ( Every 3 seconds, check disk and network , ntp server status )
+    //-----------------------------------------------------------------//
+    Util::SystemMonitor systemMonitor(
+        {QStringLiteral("/"), QStringLiteral("/var")},
+        {QStringLiteral("eth0"), QStringLiteral("eth1")},
+        3);
+
+    //-----------------------------------------------------------------//
     // Start API Server
     //-----------------------------------------------------------------//
     Api::ApiServer apiServer(&db,
                              registerTable,
                              deviceList,
-                             &pollingManager);
-
+                             &pollingManager,
+                             &systemMonitor);
 
     QString apiError;
     if(!apiServer.start(SR_API_PORT, apiError)) {
