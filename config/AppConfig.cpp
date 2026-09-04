@@ -138,6 +138,29 @@ AppConfig loadConfig(const QString &filePath)
     config.loginSecurity.minPasswordLength     = ls.value(QLatin1String("minPasswordLength")).toInt(8);
     config.loginSecurity.autoLogout            = ls.value(QLatin1String("autoLogout")).toBool(true);
 
+    // trend
+    const QJsonObject tr = root.value(QLatin1String("trend")).toObject();
+    config.trend.sampleIntervalSec = tr.value(QLatin1String("sampleIntervalSec")).toInt(10);
+
+    int chIdx = 0;
+    for (const QJsonValue &v : tr.value(QLatin1String("channels")).toArray()) {
+        const QJsonObject obj = v.toObject();
+
+        TrendChannelConfig tch;
+        tch.regId    = obj.value(QLatin1String("regId")).toInt(-1);
+        tch.name     = obj.value(QLatin1String("name")).toString();
+        tch.tag      = obj.value(QLatin1String("tag")).toString(
+                           QStringLiteral("CH_%1").arg(chIdx + 1, 2, 10, QLatin1Char('0')));
+        tch.unit     = obj.value(QLatin1String("unit")).toString();
+        tch.scale    = obj.value(QLatin1String("scale")).toDouble(1.0);
+        tch.isSigned = obj.value(QLatin1String("isSigned")).toBool(false);
+        tch.minValue = static_cast<quint16>(obj.value(QLatin1String("minValue")).toInt(0));
+        tch.maxValue = static_cast<quint16>(obj.value(QLatin1String("maxValue")).toInt(65535));
+
+        config.trend.channels.append(tch);
+        ++chIdx;
+    }
+
     return config;
 }
 
@@ -189,12 +212,30 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     ls[QLatin1String("minPasswordLength")]     = config.loginSecurity.minPasswordLength;
     ls[QLatin1String("autoLogout")]            = config.loginSecurity.autoLogout;
 
+    QJsonArray chArr;
+    for (const TrendChannelConfig &ch : config.trend.channels) {
+        QJsonObject obj;
+        obj[QLatin1String("regId")]    = ch.regId;
+        obj[QLatin1String("name")]     = ch.name;
+        obj[QLatin1String("tag")]      = ch.tag;
+        obj[QLatin1String("unit")]     = ch.unit;
+        obj[QLatin1String("scale")]    = ch.scale;
+        obj[QLatin1String("isSigned")] = ch.isSigned;
+        obj[QLatin1String("minValue")] = ch.minValue;
+        obj[QLatin1String("maxValue")] = ch.maxValue;
+        chArr.append(obj);
+    }
+    QJsonObject tr;
+    tr[QLatin1String("sampleIntervalSec")] = config.trend.sampleIntervalSec;
+    tr[QLatin1String("channels")]          = chArr;
+
     QJsonObject root;
     root[QLatin1String("network")]        = net;
     root[QLatin1String("serial")]         = serial;
     root[QLatin1String("system")]         = sys;
     root[QLatin1String("modbus_server")]  = mbs;
     root[QLatin1String("login_security")] = ls;
+    root[QLatin1String("trend")]          = tr;
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

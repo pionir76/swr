@@ -4,6 +4,7 @@
 #include <QList>
 #include <QSerialPort>
 
+
 struct Rs485Config {
     QString device;
     int     baudRate = 9600;
@@ -41,12 +42,29 @@ struct LoginSecurityConfig {
     bool autoLogout            = true;
 };
 
+struct TrendChannelConfig {
+    int     regId    = -1;
+    QString name;
+    QString tag;                 // ASCII tag for .tnd file CHTAG[16], e.g. "CH_01"
+    QString unit;
+    double  scale    = 1.0;
+    bool    isSigned = false;    // frontend sign interpretation (storage unaffected)
+    quint16 minValue = 0;        // Y-axis lower bound (raw quint16 units)
+    quint16 maxValue = 65535;    // Y-axis upper bound (raw quint16 units)
+};
+
+struct TrendConfig {
+    int                       sampleIntervalSec = 10;  // allowed: 10 | 30 | 60
+    QList<TrendChannelConfig> channels;                // max 16
+};
+
 struct AppConfig {
     QList<NetInterfaceConfig> networkInterfaces;
     Rs485Config               rs485;
     SysSettings               system;
     ModbusServerConfig        modbusServer;
     LoginSecurityConfig       loginSecurity;
+    TrendConfig               trend;
 };
 
 inline QSerialPort::Parity rs485Parity(const Rs485Config &cfg)

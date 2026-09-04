@@ -176,6 +176,9 @@ bool DeviceDatabase::initSchema(QString& error)
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
 
     const QStringList statements = {
+        //-----------------------------------------------------------//
+        // Create user tables if they do not exist 
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE TABLE IF NOT EXISTS users ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -193,6 +196,9 @@ bool DeviceDatabase::initSchema(QString& error)
             ")"
         ),
 
+        //-----------------------------------------------------------//
+        // Create device tables if they do not exist
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE TABLE IF NOT EXISTS devices ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -216,6 +222,9 @@ bool DeviceDatabase::initSchema(QString& error)
             ")"
         ),
 
+        //-----------------------------------------------------------//
+        // Create register tables if they do not exist
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE TABLE IF NOT EXISTS registers ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -239,11 +248,27 @@ bool DeviceDatabase::initSchema(QString& error)
             ")"
             ),
 
+        //-----------------------------------------------------------//
+        // Create unique index on unified_register_id for registers table
+        // If unified_register_id is negative, it is considered unassigned and not included in the index.
+        // When insert or update with same unified_register_id, 
+        // it will be rejected by the unique index constraint.
+        //
+        // if (error.contains(QLatin1String("UNIQUE"), Qt::CaseInsensitive)) {
+        //   err["error"] = QStringLiteral("unifiedAddress already in use");
+        // }
+        //
+        // WHERE unified_register_id >= 0" statement ensures that only non-negative 
+        // unified_register_id values are considered for uniqueness.
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_registers_unified_id "
             "ON registers(unified_register_id) WHERE unified_register_id >= 0"
         ),
 
+        //-----------------------------------------------------------//
+        // Create login history tables if they do not exist
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE TABLE IF NOT EXISTS login_history ("
             "  id        INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -255,6 +280,9 @@ bool DeviceDatabase::initSchema(QString& error)
             ")"
         ),
 
+        //-----------------------------------------------------------//
+        // Create index on login_history.username for faster lookups
+        //-----------------------------------------------------------//
         QStringLiteral(
             "CREATE INDEX IF NOT EXISTS idx_login_history_username "
             "ON login_history(username)"

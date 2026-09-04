@@ -61,9 +61,6 @@ void TcpWorker::run()
             if (!r.ok) {
                 allOk     = false;
                 lastError = r.error;
-
-                qWarning("TCP poll failed [device %d, register %s]: %s",
-                         m_device.id, qPrintable(config.tagName), qPrintable(r.error));
             }
         }
 

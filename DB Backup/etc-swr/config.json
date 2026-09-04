@@ -44,5 +44,26 @@
     "system": {
         "hostname": "smartroute",
         "ntpServer": "pool.ntp.org"
+    },
+    "trend": {
+        "sampleIntervalSec": 10,
+        "channels": [
+            { "regId": 40003, "name": "메인룸 출력값",        "unit": "%",   "scale": 0.1,  "isSigned": false, "minValue": 180,  "maxValue": 820  },
+            { "regId": 40004, "name": "메인룸 운전상태",       "unit": "",    "scale": 1.0,  "isSigned": false, "minValue": 0,    "maxValue": 1    },
+            { "regId": 40006, "name": "메인룸 경보상태",       "unit": "",    "scale": 1.0,  "isSigned": false, "minValue": 0,    "maxValue": 1    },
+            { "regId": 40009, "name": "액 출구 온도",          "unit": "°C",  "scale": 0.1,  "isSigned": true,  "minValue": 0,    "maxValue": 530  },
+            { "regId": 40010, "name": "과열도",                "unit": "°C",  "scale": 0.1,  "isSigned": false, "minValue": 37,   "maxValue": 123  },
+            { "regId": 40011, "name": "흡입 압력",             "unit": "bar", "scale": 0.01, "isSigned": false, "minValue": 240,  "maxValue": 560  },
+            { "regId": 40012, "name": "포화 온도",             "unit": "°C",  "scale": 0.1,  "isSigned": true,  "minValue": 0,    "maxValue": 830  },
+            { "regId": 40013, "name": "흡입 온도",             "unit": "°C",  "scale": 0.1,  "isSigned": true,  "minValue": 0,    "maxValue": 1350 },
+            { "regId": 40014, "name": "밸브 개도율",           "unit": "%",   "scale": 0.1,  "isSigned": false, "minValue": 70,   "maxValue": 830  },
+            { "regId": 40015, "name": "시스템 상태",           "unit": "",    "scale": 1.0,  "isSigned": false, "minValue": 0,    "maxValue": 1    },
+            { "regId": 40016, "name": "알람 상태",             "unit": "",    "scale": 1.0,  "isSigned": false, "minValue": 0,    "maxValue": 1    },
+            { "regId": 40017, "name": "액 출구 온도 설정값",   "unit": "°C",  "scale": 0.1,  "isSigned": true,  "minValue": 486,  "maxValue": 494  },
+            { "regId": 40018, "name": "과열도 설정값",         "unit": "°C",  "scale": 0.1,  "isSigned": false, "minValue": 76,   "maxValue": 84   },
+            { "regId": 40020, "name": "수동 밸브 위치",        "unit": "%",   "scale": 0.1,  "isSigned": false, "minValue": 80,   "maxValue": 720  },
+            { "regId": 40021, "name": "고온실 설정온도",       "unit": "°C",  "scale": 1.0,  "isSigned": false, "minValue": 59,   "maxValue": 61   },
+            { "regId": 40024, "name": "고온실 운전상태",       "unit": "",    "scale": 1.0,  "isSigned": false, "minValue": 0,    "maxValue": 1    }
+        ]
     }
 }

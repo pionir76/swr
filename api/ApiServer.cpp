@@ -10,6 +10,10 @@
 #include "../data_collection/polling/PollingManager.h"
 #include "../utils/Logger.h"
 #include "../utils/SystemMonitor.h"
+#include "../trend/TrendDatabase.h"
+#include "../trend/TrendSampler.h"
+#include "../TrendHandler/TrendFileRecorder.h"
+#include "../TrendHandler/TrendFileReader.h"
 
 #include <QCoreApplication>
 #include <QHttpServerRequest>
@@ -35,6 +39,9 @@ ApiServer::ApiServer(Database::DeviceDatabase *db,
                      std::shared_ptr<Store::DeviceList> deviceList,
                      Polling::PollingManager *pollingManager,
                      Util::SystemMonitor *systemMonitor,
+                     Trend::TrendDatabase *trendDb,
+                     Trend::TrendSampler *trendSampler,
+                     TrendHandler::TrendFileRecorder *trendFileRecorder,
                      QObject *parent)
     : QObject(parent)
     , m_db(db)
@@ -42,6 +49,9 @@ ApiServer::ApiServer(Database::DeviceDatabase *db,
     , m_deviceList(std::move(deviceList))
     , m_pollingManager(pollingManager)
     , m_systemMonitor(systemMonitor)
+    , m_trendDb(trendDb)
+    , m_trendSampler(trendSampler)
+    , m_trendFileRecorder(trendFileRecorder)
 {
 }
 
@@ -78,7 +88,7 @@ void ApiServer::stop()
 }
 
 // ---------------------------------------------------------------------------
-// Route Setup
+// Route Setup : route(URL, HTTP Method, handler(RAMDA)))
 // ---------------------------------------------------------------------------
 void ApiServer::setupRoutes()
 {
@@ -194,6 +204,35 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePostFactoryReset(req); });
     m_server.route("/api/system/resources", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetSystemResources(req); });
+
+    m_server.route("/api/trend/config", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTrendConfig(req); });
+    m_server.route("/api/trend/config", QHttpServerRequest::Method::Put,
+                   [this](const QHttpServerRequest &req) { return handlePutTrendConfig(req); });
+    m_server.route("/api/trend/status", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTrendStatus(req); });
+    m_server.route("/api/trend/data", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTrendData(req); });
+    m_server.route("/api/trend/export", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTrendExport(req); });
+
+    // Trend File
+    m_server.route("/api/tfile/start", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostTfileStart(req); });
+    m_server.route("/api/tfile/stop", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostTfileStop(req); });
+    m_server.route("/api/tfile/status", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTfileStatus(req); });
+    m_server.route("/api/tfile/files", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTfileFiles(req); });
+    m_server.route("/api/tfile/files/<arg>", QHttpServerRequest::Method::Delete,
+                   [this](const QString &fn, const QHttpServerRequest &req) { return handleDeleteTfileFile(req, fn); });
+    m_server.route("/api/tfile/header", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTfileHeader(req); });
+    m_server.route("/api/tfile/latest", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTfileLatest(req); });
+    m_server.route("/api/tfile/sample", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetTfileSample(req); });
 }
 
 // ---------------------------------------------------------------------------
@@ -1895,11 +1934,30 @@ QHttpServerResponse ApiServer::handleGetConfig(const QHttpServerRequest &request
     mbs[QLatin1String("port")]    = config.modbusServer.port;
     mbs[QLatin1String("slaveId")] = config.modbusServer.slaveId;
 
+    // trend channels & sample interval
+    QJsonArray chArr;
+    for (const TrendChannelConfig &ch : config.trend.channels) {
+        QJsonObject obj;
+        obj[QLatin1String("regId")]    = ch.regId;
+        obj[QLatin1String("name")]     = ch.name;
+        obj[QLatin1String("unit")]     = ch.unit;
+        obj[QLatin1String("scale")]    = ch.scale;
+        obj[QLatin1String("isSigned")] = ch.isSigned;
+        obj[QLatin1String("minValue")] = ch.minValue;
+        obj[QLatin1String("maxValue")] = ch.maxValue;
+        chArr.append(obj);
+    }
+
+    QJsonObject tr;
+    tr[QLatin1String("sampleIntervalSec")] = config.trend.sampleIntervalSec;
+    tr[QLatin1String("channels")]          = chArr;
+
     QJsonObject resp;
     resp[QLatin1String("network")]       = net;
     resp[QLatin1String("serial")]        = serial;
     resp[QLatin1String("system")]        = sys;
     resp[QLatin1String("modbusServer")]  = mbs;
+    resp[QLatin1String("trend")]         = tr;
     return QHttpServerResponse(resp);
 }
 
@@ -1915,6 +1973,7 @@ QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &r
     config.rs485             = defaults.rs485;
     config.system            = defaults.system;
     config.modbusServer      = defaults.modbusServer;
+    config.trend             = defaults.trend;
 
     QString saveError;
     if (!saveConfig(QStringLiteral(SR_CONFIG_FILE), config, saveError)) {
@@ -2482,7 +2541,20 @@ QHttpServerResponse ApiServer::handlePostFactoryReset(const QHttpServerRequest &
     }
 
     //-----------------------------------------------------------------------//
-    // 3. Initialize Logs
+    // 3. Initialize Trend DB
+    //-----------------------------------------------------------------------//
+    if (m_trendDb && m_trendDb->isOpen()) {
+        QString trendErr;
+        if (!m_trendDb->deleteAll(trendErr))
+            Util::Logger::error(QStringLiteral("Factory reset trend DB failed: %1").arg(trendErr));
+    }
+    if (m_trendSampler) {
+        const AppConfig defaults = factoryDefaultConfig();
+        m_trendSampler->applyConfig(defaults.trend);
+    }
+
+    //-----------------------------------------------------------------------//
+    // 4. Initialize Logs
     //-----------------------------------------------------------------------//
     QString logErr;
     Util::Logger::clearAll(logErr);
@@ -2545,6 +2617,642 @@ QHttpServerResponse ApiServer::handleGetSystemResources(const QHttpServerRequest
     resp[QLatin1String("uptimeSeconds")] = res.uptimeSeconds;
     resp[QLatin1String("cachedAt")]      = res.cachedAt.toString(Qt::ISODate);
     return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTrendStatus(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    const int channelCount = cfg.trend.channels.size();
+
+    QJsonObject resp;
+    resp[QLatin1String("recording")]         = channelCount > 0;
+    resp[QLatin1String("channelCount")]      = channelCount;
+    resp[QLatin1String("sampleIntervalSec")] = cfg.trend.sampleIntervalSec;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTrendConfig(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+
+    QJsonArray channels;
+    for (const TrendChannelConfig &ch : config.trend.channels) {
+        QJsonObject obj;
+        obj[QLatin1String("regId")]    = ch.regId;
+        obj[QLatin1String("name")]     = ch.name;
+        obj[QLatin1String("tag")]      = ch.tag;
+        obj[QLatin1String("unit")]     = ch.unit;
+        obj[QLatin1String("scale")]    = ch.scale;
+        obj[QLatin1String("isSigned")] = ch.isSigned;
+        obj[QLatin1String("minValue")] = ch.minValue;
+        obj[QLatin1String("maxValue")] = ch.maxValue;
+        channels.append(obj);
+    }
+
+    //-----------------------------------------------------------------------//
+    // Add dataRange info if trend DB is open and has data
+    //-----------------------------------------------------------------------//
+    QJsonValue dataRange = QJsonValue::Null;
+    if (m_trendDb && m_trendDb->isOpen()) {
+        const auto [from, to] = m_trendDb->dataRange();
+        if (from > 0) {
+            QJsonObject dr;
+            dr[QLatin1String("from")] = from;
+            dr[QLatin1String("to")]   = to;
+            dataRange = dr;
+        }
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("sampleIntervalSec")] = config.trend.sampleIntervalSec;
+    resp[QLatin1String("channels")]          = channels;
+    resp[QLatin1String("dataRange")]         = dataRange;
+
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handlePutTrendConfig(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+    AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+
+    //-----------------------------------------------------------------------//
+    // Validate sampleIntervalSec
+    //-----------------------------------------------------------------------//
+    if (body.contains(QLatin1String("sampleIntervalSec"))) {
+        const int interval = body.value(QLatin1String("sampleIntervalSec")).toInt();
+        if (interval != 1 && interval != 5 && interval != 10 && interval != 30 && interval != 60) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("sampleIntervalSec must be 1, 5, 10, 30, or 60");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        config.trend.sampleIntervalSec = interval;
+    }
+
+    //-----------------------------------------------------------------------//
+    // Validate channels
+    //-----------------------------------------------------------------------//
+    bool channelsChanged = false;
+    if (body.contains(QLatin1String("channels"))) {
+        const QJsonArray arr = body.value(QLatin1String("channels")).toArray();
+        if (arr.size() > 16) {
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("channels must not exceed 16");
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+        }
+
+        QSet<int> oldIds;
+        for (const TrendChannelConfig &ch : config.trend.channels)
+            oldIds.insert(ch.regId);
+
+        config.trend.channels.clear();
+        QSet<int> newIds;
+        int chIdx = 0;
+        for (const QJsonValue &v : arr) {
+            const QJsonObject obj = v.toObject();
+            TrendChannelConfig tch;
+            tch.regId    = obj.value(QLatin1String("regId")).toInt(-1);
+            tch.name     = obj.value(QLatin1String("name")).toString();
+            const QString tagRaw = obj.value(QLatin1String("tag")).toString().left(16);
+            tch.tag      = tagRaw.isEmpty()
+                               ? QStringLiteral("CH_%1").arg(chIdx + 1, 2, 10, QLatin1Char('0'))
+                               : tagRaw;
+            tch.unit     = obj.value(QLatin1String("unit")).toString();
+            tch.scale    = obj.value(QLatin1String("scale")).toDouble(1.0);
+            tch.isSigned = obj.value(QLatin1String("isSigned")).toBool(false);
+            tch.minValue = static_cast<quint16>(obj.value(QLatin1String("minValue")).toInt(0));
+            tch.maxValue = static_cast<quint16>(obj.value(QLatin1String("maxValue")).toInt(65535));
+            config.trend.channels.append(tch);
+            newIds.insert(tch.regId);
+            ++chIdx;
+        }
+        channelsChanged = (oldIds != newIds);
+    }
+
+    //-----------------------------------------------------------------------//
+    // If channels changed, delete all trend data from DB to avoid mismatched data
+    //-----------------------------------------------------------------------//
+    if (channelsChanged && m_trendDb && m_trendDb->isOpen()) {
+        QString dbErr;
+        if (!m_trendDb->deleteAll(dbErr)) {
+            Util::Logger::error(QStringLiteral("Trend DB deleteAll failed: %1").arg(dbErr));
+            QJsonObject err;
+            err[QLatin1String("error")] = QStringLiteral("Failed to reset trend database: %1").arg(dbErr);
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        Util::Logger::info(QStringLiteral("Trend DB reset due to channel config change."));
+    }
+
+    QString saveError;
+    if (!saveConfig(QStringLiteral(SR_CONFIG_FILE), config, saveError)) {
+        Util::Logger::error(QStringLiteral("saveConfig (trend) failed: %1").arg(saveError));
+        QJsonObject err;
+        err[QLatin1String("error")] = saveError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    Util::Logger::info(QStringLiteral("Trend config saved."));
+
+    if (m_trendSampler)
+        m_trendSampler->applyConfig(config.trend);
+
+    QJsonArray channels;
+    for (const TrendChannelConfig &ch : config.trend.channels) {
+        QJsonObject obj;
+        obj[QLatin1String("regId")]    = ch.regId;
+        obj[QLatin1String("name")]     = ch.name;
+        obj[QLatin1String("tag")]      = ch.tag;
+        obj[QLatin1String("unit")]     = ch.unit;
+        obj[QLatin1String("scale")]    = ch.scale;
+        obj[QLatin1String("isSigned")] = ch.isSigned;
+        obj[QLatin1String("minValue")] = ch.minValue;
+        obj[QLatin1String("maxValue")] = ch.maxValue;
+        channels.append(obj);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("sampleIntervalSec")] = config.trend.sampleIntervalSec;
+    resp[QLatin1String("channels")]          = channels;
+    return QHttpServerResponse(resp);
+}
+
+//---------------------------------------------------------------------------//
+// Trend Data Query
+// example: GET /api/trend/data?from=1680000000&to=1680003600&resolution=5m&registers=1,2,3
+//---------------------------------------------------------------------------//
+QHttpServerResponse ApiServer::handleGetTrendData(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    if (!m_trendDb || !m_trendDb->isOpen()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Trend database not available");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::ServiceUnavailable);
+    }
+
+    const QUrlQuery q(request.url().query());
+    //q :"from=1755561600&to=1755648000&resolution=raw"
+
+    const qint64 from = q.queryItemValue(QStringLiteral("from")).toLongLong();
+    const qint64 to   = q.queryItemValue(QStringLiteral("to")).toLongLong();
+    if (from <= 0 || to <= 0 || to <= from) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("from and to must be valid unix timestamps with to > from");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QString resolution = q.queryItemValue(QStringLiteral("resolution"));
+    if (resolution != QLatin1String("raw") &&
+        resolution != QLatin1String("5m")  &&
+        resolution != QLatin1String("10m")) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("resolution must be raw, 5m, or 10m");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    QList<int> registers;
+    const QString regsStr = q.queryItemValue(QStringLiteral("registers"));
+    if (!regsStr.isEmpty()) {
+        for (const QString &s : regsStr.split(QLatin1Char(',')))
+            registers.append(s.trimmed().toInt());
+    }
+
+    //-----------------------------------------------------------------//
+    // Query trend data from database
+    // If registers is empty, all channels will be returned
+    // Bucketing is done in the database query for performance and Max Size is about <1000
+    //-----------------------------------------------------------------//
+    QString dbError;
+    const QMap<int, QList<Trend::TrendPoint>> data = m_trendDb->query(from, to, resolution, registers, dbError);
+
+    if (!dbError.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = dbError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    // Load trend channel config from current config file
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+
+    QHash<int, TrendChannelConfig> chMap;
+    for (const TrendChannelConfig &ch : cfg.trend.channels){
+        chMap.insert(ch.regId, ch);
+    }
+
+    QJsonObject meta;
+    QJsonObject channels;
+
+    //-----------------------------------------------------------------//
+    // KEY: regId, VALUE: array of { ts, v }
+    //-----------------------------------------------------------------//
+    for (auto it = data.cbegin(); it != data.cend(); ++it) {
+        const QString key = QString::number(it.key());
+
+        const TrendChannelConfig &ch = chMap[it.key()];
+        const bool isSigned = ch.isSigned;
+
+        qint32  sMin  =  std::numeric_limits<qint16>::max();
+        qint32  sMax  =  std::numeric_limits<qint16>::min();
+        qint64  sSum  =  0;
+        quint16 uMin  =  std::numeric_limits<quint16>::max();
+        quint16 uMax  =  0;
+        quint64 uSum  =  0;
+        int     count =  0;
+
+        QJsonArray pts;
+        for (const Trend::TrendPoint &pt : it.value()) {
+            QJsonObject obj;
+            obj[QLatin1String("ts")] = pt.ts;
+            obj[QLatin1String("v")]  = pt.avg;
+            pts.append(obj);
+
+            //-----------------------------------------------------------------//
+            // Calculate summary stats for meta
+            // Note: avg is stored as quint16, but for signed channels 
+            // we need to convert to qint16 first
+            //-----------------------------------------------------------------//
+            if (isSigned) {
+                const qint16 sv = static_cast<qint16>(pt.avg);
+                const qint16 mn = static_cast<qint16>(pt.min);
+                const qint16 mx = static_cast<qint16>(pt.max);
+                sSum += sv;
+                sMin  = qMin(sMin, static_cast<qint32>(mn));
+                sMax  = qMax(sMax, static_cast<qint32>(mx));
+            } else {
+                uSum += pt.avg;
+                uMin  = qMin(uMin, pt.min);
+                uMax  = qMax(uMax, pt.max);
+            }
+            ++count;
+        }
+        channels[key] = pts;
+
+        QJsonObject m;
+        m[QLatin1String("name")]     = ch.name;
+        m[QLatin1String("unit")]     = ch.unit;
+        m[QLatin1String("scale")]    = ch.scale;
+        m[QLatin1String("isSigned")] = ch.isSigned;
+        m[QLatin1String("minValue")] = ch.minValue;
+        m[QLatin1String("maxValue")] = ch.maxValue;
+        if (count > 0) {
+            if (isSigned) {
+                m[QLatin1String("avg")] = static_cast<quint16>(static_cast<qint16>(sSum / count));
+                m[QLatin1String("min")] = static_cast<quint16>(static_cast<qint16>(sMin));
+                m[QLatin1String("max")] = static_cast<quint16>(static_cast<qint16>(sMax));
+            } else {
+                m[QLatin1String("avg")] = static_cast<quint16>(uSum / static_cast<quint64>(count));
+                m[QLatin1String("min")] = uMin;
+                m[QLatin1String("max")] = uMax;
+            }
+        }
+        meta[key] = m;
+    }
+
+    QJsonArray configuredChannels;
+    for (const TrendChannelConfig &ch : cfg.trend.channels)
+        configuredChannels.append(ch.regId);
+
+    QJsonObject resp;
+    resp[QLatin1String("from")]               = from;
+    resp[QLatin1String("to")]                 = to;
+    resp[QLatin1String("resolution")]         = resolution;
+    resp[QLatin1String("configuredChannels")] = configuredChannels;
+    resp[QLatin1String("meta")]               = meta;
+    resp[QLatin1String("channels")]           = channels;
+    
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTrendExport(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    if (!m_trendDb || !m_trendDb->isOpen()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("Trend database not available");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::ServiceUnavailable);
+    }
+
+    const QUrlQuery q(request.url().query());
+    const qint64 from = q.queryItemValue(QStringLiteral("from")).toLongLong();
+    const qint64 to   = q.queryItemValue(QStringLiteral("to")).toLongLong();
+
+    if (from <= 0 || to <= 0 || to <= from) {
+        QJsonObject err;
+        err[QLatin1String("error")] = QStringLiteral("from and to must be valid unix timestamps with to > from");
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    // Build regId → channel name map from config
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    QHash<int, QString> nameMap;
+    for (const TrendChannelConfig &ch : cfg.trend.channels)
+        nameMap.insert(ch.regId, ch.name);
+
+    // Query raw data only (export always uses raw resolution)
+    QString dbError;
+    const QMap<int, QList<Trend::TrendPoint>> data =
+        m_trendDb->query(from, to, QStringLiteral("raw"), {}, dbError);
+
+    if (!dbError.isEmpty()) {
+        QJsonObject err;
+        err[QLatin1String("error")] = dbError;
+        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    // Build CSV
+    QString csv;
+    csv.reserve(1024 * 1024);
+    csv += QStringLiteral("timestamp,datetime,reg_id,channel_name,value\r\n");
+
+    for (auto it = data.cbegin(); it != data.cend(); ++it) {
+        const int     regId = it.key();
+        const QString name  = nameMap.value(regId, QString::number(regId));
+        for (const Trend::TrendPoint &pt : it.value()) {
+            const QString dt = QDateTime::fromSecsSinceEpoch(pt.ts)
+                                   .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            csv += QString::number(pt.ts)  + QLatin1Char(',')
+                 + dt                      + QLatin1Char(',')
+                 + QString::number(regId)  + QLatin1Char(',')
+                 + name                    + QLatin1Char(',')
+                 + QString::number(pt.avg) + QStringLiteral("\r\n");
+        }
+    }
+
+    const QString fromStr = QDateTime::fromSecsSinceEpoch(from).toString(QStringLiteral("yyyyMMdd"));
+    const QString toStr   = QDateTime::fromSecsSinceEpoch(to).toString(QStringLiteral("yyyyMMdd"));
+    const QByteArray filename =
+        QStringLiteral("trend_raw_%1_%2.csv").arg(fromStr, toStr).toUtf8();
+
+    QHttpServerResponse resp(QByteArrayLiteral("text/csv; charset=utf-8"), csv.toUtf8());
+    QHttpHeaders hdrs = resp.headers();
+    hdrs.append(QHttpHeaders::WellKnownHeader::ContentDisposition,
+                QStringLiteral("attachment; filename=\"%1\"").arg(QString::fromUtf8(filename)));
+    resp.setHeaders(std::move(hdrs));
+    return resp;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/tfile/start
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostTfileStart(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    if (!m_trendFileRecorder) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("TrendFileRecorder not available");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    if (m_trendFileRecorder->isRecording()) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Already recording");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+    }
+
+    const AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    if (config.trend.channels.isEmpty()) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("No trend channels configured");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    QString startErr;
+    if (!m_trendFileRecorder->start(config.trend, startErr)) {
+        QJsonObject e; e[QLatin1String("error")] = startErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")] = true;
+    resp[QLatin1String("filename")] = m_trendFileRecorder->status().filename;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/tfile/stop
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostTfileStop(const QHttpServerRequest &request)
+{
+if (auto err = requireAuth(request)) return std::move(*err);
+
+    if (!m_trendFileRecorder) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("TrendFileRecorder not available");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    m_trendFileRecorder->stop();
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")] = true;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tfile/status
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTfileStatus(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    if (!m_trendFileRecorder) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("TrendFileRecorder not available");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    const TrendHandler::TrendFileRecorder::Status s = m_trendFileRecorder->status();
+
+    QJsonObject resp;
+    resp[QLatin1String("recording")]     = s.recording;
+    resp[QLatin1String("filename")]      = s.filename;
+    resp[QLatin1String("elapsedSec")]    = static_cast<qint64>(s.elapsedSec);
+    resp[QLatin1String("fileSize")]      = static_cast<qint64>(s.fileSize);
+    resp[QLatin1String("fileSizeLimit")] = static_cast<qint64>(TrendHandler::TrendFileWriter::kMaxFileSize);
+    resp[QLatin1String("recordCount")]   = static_cast<qint64>(s.recordCount);
+    resp[QLatin1String("freq")]          = s.freq;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tfile/files
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTfileFiles(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    QString listErr;
+    const QList<TrendHandler::TrendFileReader::FileInfo> files =
+        TrendHandler::TrendFileReader::listFiles(QStringLiteral(SR_TFILE_DIR), listErr);
+
+    QJsonArray arr;
+    for (const TrendHandler::TrendFileReader::FileInfo &fi : files) {
+        QJsonObject obj;
+        obj[QLatin1String("filename")]    = fi.filename;
+        obj[QLatin1String("fileSize")]    = static_cast<qint64>(fi.fileSize);
+        obj[QLatin1String("startTime")]   = static_cast<qint64>(fi.startTime);
+        obj[QLatin1String("endTime")]     = static_cast<qint64>(fi.endTime);
+        obj[QLatin1String("recordCount")] = static_cast<qint64>(fi.recordCount);
+        obj[QLatin1String("freq")]        = static_cast<int>(fi.freq);
+        obj[QLatin1String("chCount")]     = static_cast<int>(fi.chCount);
+        arr.append(obj);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("files")] = arr;
+    if (!listErr.isEmpty())
+        resp[QLatin1String("error")] = listErr;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/tfile/files/{filename}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleDeleteTfileFile(const QHttpServerRequest &request,
+                                                     const QString &filename)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    // Reject path traversal
+    if (filename.contains(QLatin1Char('/')) || filename.contains(QLatin1String(".."))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Invalid filename");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    // Reject deleting the file that is currently being recorded
+    if (m_trendFileRecorder && m_trendFileRecorder->isRecording()) {
+        if (m_trendFileRecorder->status().filename == filename) {
+            QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Cannot delete file while recording");
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+        }
+    }
+
+    const QString path = QStringLiteral(SR_TFILE_DIR) + QLatin1Char('/') + filename;
+    if (!QFile::exists(path)) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("File not found");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    if (!QFile::remove(path)) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Failed to delete file");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp; resp[QLatin1String("ok")] = true;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tfile/header?file={filename}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTfileHeader(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const QUrlQuery q(request.url().query());
+    const QString filename = q.queryItemValue(QStringLiteral("file"));
+
+    if (filename.isEmpty() || filename.contains(QLatin1Char('/')) || filename.contains(QLatin1String(".."))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Invalid filename");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QString path = QStringLiteral(SR_TFILE_DIR) + QLatin1Char('/') + filename;
+    QString readErr;
+    const QByteArray data = TrendHandler::TrendFileReader::readHeader(path, readErr);
+    if (data.isEmpty()) {
+        QJsonObject e; e[QLatin1String("error")] = readErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    return QHttpServerResponse(QByteArrayLiteral("application/octet-stream"), data);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tfile/latest?file={filename}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTfileLatest(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const QUrlQuery q(request.url().query());
+    const QString filename = q.queryItemValue(QStringLiteral("file"));
+
+    if (filename.isEmpty() || filename.contains(QLatin1Char('/')) || filename.contains(QLatin1String(".."))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Invalid filename");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QString path = QStringLiteral(SR_TFILE_DIR) + QLatin1Char('/') + filename;
+    QString readErr;
+    const QByteArray data = TrendHandler::TrendFileReader::readLatest(path, readErr);
+    if (data.isEmpty()) {
+        QJsonObject e; e[QLatin1String("error")] = readErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    return QHttpServerResponse(QByteArrayLiteral("application/octet-stream"), data);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/tfile/sample?file={filename}&from={unix}&to={unix}&step={N}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetTfileSample(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const QUrlQuery q(request.url().query());
+    const QString filename = q.queryItemValue(QStringLiteral("file"));
+
+    if (filename.isEmpty() || filename.contains(QLatin1Char('/')) || filename.contains(QLatin1String(".."))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Invalid filename");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    bool ok;
+    const quint32 from = q.queryItemValue(QStringLiteral("from")).toULong(&ok);
+    if (!ok) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing or invalid 'from'");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+    const quint32 to = q.queryItemValue(QStringLiteral("to")).toULong(&ok);
+    if (!ok) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing or invalid 'to'");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+    quint16 step = static_cast<quint16>(
+        q.hasQueryItem(QStringLiteral("step"))
+            ? qMax(1, q.queryItemValue(QStringLiteral("step")).toInt())
+            : 1);
+
+    // Guard: enforce minimum step to keep response within 50,000 records (1.6 MB)
+    if (to >= from) {
+        constexpr quint32 kMaxRecords = 50000;
+        const quint32 range = to - from;
+        // freq unknown here — reader enforces internally; step hint only
+        if (range / step > kMaxRecords)
+            step = static_cast<quint16>(qMax(1u, range / kMaxRecords));
+    }
+
+    const QString path = QStringLiteral(SR_TFILE_DIR) + QLatin1Char('/') + filename;
+    QString readErr;
+    const QByteArray data = TrendHandler::TrendFileReader::readSample(path, from, to, step, readErr);
+    if (data.isEmpty() && !readErr.isEmpty()) {
+        QJsonObject e; e[QLatin1String("error")] = readErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    return QHttpServerResponse(QByteArrayLiteral("application/octet-stream"), data);
 }
 
 } // namespace Api

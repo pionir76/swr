@@ -42,3 +42,4 @@ ui_*.h
 # OS
 .DS_Store
 Thumbs.db
+trend/trend_seed.db
