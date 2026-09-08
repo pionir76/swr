@@ -17,7 +17,8 @@ TrendFileWriter::~TrendFileWriter()
 // open : Create new trend file and write header
 // keep file open for subsequent appendRecord() calls
 // ---------------------------------------------------------------------------
-bool TrendFileWriter::open(const QString &path, const TndWriterConfig &config, QString &error)
+bool TrendFileWriter::open(const QString &path, const TndWriterConfig &config,
+                           const QDateTime &startTime, QString &error)
 {
     close();
 
@@ -39,13 +40,13 @@ bool TrendFileWriter::open(const QString &path, const TndWriterConfig &config, Q
     fh.zcode = config.zcode;
     fh.fver  = config.fver;
 
-    const QDateTime now = QDateTime::currentDateTime();
-    fh.stime[0] = static_cast<quint8>(now.date().year() % 100);
-    fh.stime[1] = static_cast<quint8>(now.date().month());
-    fh.stime[2] = static_cast<quint8>(now.date().day());
-    fh.stime[3] = static_cast<quint8>(now.time().hour());
-    fh.stime[4] = static_cast<quint8>(now.time().minute());
-    fh.stime[5] = static_cast<quint8>(now.time().second());
+    // Use caller-supplied startTime so filename and STIME header are identical
+    fh.stime[0] = static_cast<quint8>(startTime.date().year() % 100);
+    fh.stime[1] = static_cast<quint8>(startTime.date().month());
+    fh.stime[2] = static_cast<quint8>(startTime.date().day());
+    fh.stime[3] = static_cast<quint8>(startTime.time().hour());
+    fh.stime[4] = static_cast<quint8>(startTime.time().minute());
+    fh.stime[5] = static_cast<quint8>(startTime.time().second());
 
     if (m_file.write(reinterpret_cast<const char*>(&fh), sizeof(fh)) != sizeof(fh)) {
         error = QStringLiteral("Header write failed: %1").arg(m_file.errorString());
@@ -87,7 +88,11 @@ bool TrendFileWriter::appendRecord(const quint16 values[16], QString &error)
         return false;
     }
 
-    if (fileSize() + kRecordSize > kMaxFileSize) {
+    // At block boundary a record write also emits pad(24) + next block header(8) = +32 extra bytes
+    const qint64 worstCase = (m_dataCnt == kRecordsPerBlock - 1)
+                             ? kRecordSize + kBlockPadSize + kBlockHeaderSize
+                             : kRecordSize;
+    if (fileSize() + worstCase > kMaxFileSize) {
         error = QStringLiteral("capacity_exceeded");
         return false;
     }
@@ -131,20 +136,25 @@ bool TrendFileWriter::appendRecord(const quint16 values[16], QString &error)
             return false;
         }
 
-        m_blkIndex++;
-        m_dataCnt = 0;
+        // Write next block header before advancing internal state so that
+        // an I/O failure here leaves state consistent with what is on disk.
+        const quint32 nextBlkIndex = m_blkIndex + 1;
+        const qint64  nextBlkOff   = kHeaderSize + static_cast<qint64>(nextBlkIndex) * kBlockSize;
 
-        if (!m_file.seek(blockOffset())) {
+        if (!m_file.seek(nextBlkOff)) {
             error = m_file.errorString();
             return false;
         }
 
         TndBlockHeader bh;
-        bh.blkIndex = m_blkIndex;
+        bh.blkIndex = nextBlkIndex;
         if (m_file.write(reinterpret_cast<const char*>(&bh), sizeof(bh)) != sizeof(bh)) {
             error = QStringLiteral("Block header write failed: %1").arg(m_file.errorString());
             return false;
         }
+
+        m_blkIndex = nextBlkIndex;
+        m_dataCnt  = 0;
     }
 
     m_file.flush();

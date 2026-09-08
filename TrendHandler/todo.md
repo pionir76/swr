@@ -1,8 +1,8 @@
 # TrendHandler 개발 TODO
 
-> 작성일: 2026-08-21  
+> 작성일: 2026-08-21 / 최종 수정: 2026-09-08  
 > 사양 참조: `TrendHandler/file_based_plan.md`  
-> 기존 SQLite 방식(`trend/`)과 병행 구현. 최종 방식은 결과 평가 후 선정.
+> SQLite 기반 트렌드(`trend/` 폴더) 완전 제거. 파일 기반 단일 방식으로 확정.
 
 ---
 
@@ -76,7 +76,7 @@ TrendHandler/
   - `scaleToDotpos()`: scale(1.0/0.1/0.01) → dotpos(0/1/2)
 
 - [x] main.cpp 연동
-  - 앱 시작 시 `config.trend.channels` 가 있으면 즉시 레코딩 시작
+  - ~~앱 시작 시 `config.trend.channels` 가 있으면 즉시 레코딩 시작~~ → **폐기**: 모든 레코딩은 `POST /api/tfile/start`로만 시작 (재부팅 시 자동 레코딩 없음)
   - CMakeLists.txt에 소스 추가 및 `SR_TFILE_DIR="/trend_data"` 정의 완료
 
 ---
@@ -146,8 +146,10 @@ TrendHandler/
 ## 완료 기준
 
 - [x] `.tnd` 파일 생성 / 레코딩 정상 동작 (실기 검증 완료)
-- [ ] `/api/tfile/header` 로 512 bytes 파싱 가능
-- [ ] `/api/tfile/sample` 로 프론트 차트 렌더링 가능
-- [ ] `/api/tfile/latest` 로 실시간 1초 폴링 동작
-- [ ] 4 GB 초과 시 자동 중단
-- [ ] DELETE /api/tfile/files/{filename} 정상 동작 확인
+- [x] `/api/tfile/header` 로 512 bytes 파싱 가능
+- [x] `/api/tfile/sample` 로 프론트 차트 렌더링 가능
+- [x] `/api/tfile/latest` 로 실시간 1초 폴링 동작
+- [x] 4 GB 초과 시 자동 중단 (capacity_exceeded 처리)
+- [x] DELETE /api/tfile/files/{filename} 정상 동작 확인
+- [x] SQLite 기반 트렌드 완전 제거 (trend/ 폴더, TrendDatabase, TrendSampler)
+- [x] 버그 수정 4건 (stack overflow, capacity check, block I/O safety, startTime 불일치)

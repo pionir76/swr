@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QFile>
 #include <QString>
 #include <QtGlobal>
@@ -67,7 +68,8 @@ public:
     TrendFileWriter();
     ~TrendFileWriter();
 
-    bool open(const QString &path, const TndWriterConfig &config, QString &error);
+    bool open(const QString &path, const TndWriterConfig &config,
+              const QDateTime &startTime, QString &error);
     bool appendRecord(const quint16 values[16], QString &error);
     void close();
 

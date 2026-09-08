@@ -9,7 +9,6 @@ namespace DataCollection::Store   { class RegisterTable; class DeviceList; }
 namespace DataCollection::Polling { class PollingManager; }
 namespace DataCollection::Model   { struct DeviceInfo; struct RegisterConfig; }
 namespace Util { class SystemMonitor; }
-namespace Trend { class TrendDatabase; class TrendSampler; }
 namespace TrendHandler { class TrendFileRecorder; }
 
 namespace Api{
@@ -24,8 +23,6 @@ public:
                        std::shared_ptr<DataCollection::Store::DeviceList> deviceList,
                        DataCollection::Polling::PollingManager *pollingManager,
                        Util::SystemMonitor *systemMonitor,
-                       Trend::TrendDatabase *trendDb,
-                       Trend::TrendSampler *trendSampler,
                        TrendHandler::TrendFileRecorder *trendFileRecorder,
                        QObject *parent = nullptr);
 
@@ -112,14 +109,15 @@ private:
     // System Resources
     QHttpServerResponse handleGetSystemResources(const QHttpServerRequest &request);
 
-    // Trend Config
+    // System Time
+    QHttpServerResponse handleGetSystemTime(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutSystemNtp(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutSystemTimezone(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutSystemTime(const QHttpServerRequest &request);
+
+    // Trend Config (채널/샘플간격 설정 — TrendFileRecorder 에서 읽음)
     QHttpServerResponse handleGetTrendConfig(const QHttpServerRequest &request);
     QHttpServerResponse handlePutTrendConfig(const QHttpServerRequest &request);
-
-    // Trend Data
-    QHttpServerResponse handleGetTrendStatus(const QHttpServerRequest &request);
-    QHttpServerResponse handleGetTrendData(const QHttpServerRequest &request);
-    QHttpServerResponse handleGetTrendExport(const QHttpServerRequest &request);
 
     // Trend File
     QHttpServerResponse handlePostTfileStart(const QHttpServerRequest &request);
@@ -149,8 +147,6 @@ private:
     std::shared_ptr<DataCollection::Store::DeviceList> m_deviceList;
     DataCollection::Polling::PollingManager *m_pollingManager;
     Util::SystemMonitor *m_systemMonitor;
-    Trend::TrendDatabase              *m_trendDb;
-    Trend::TrendSampler               *m_trendSampler;
     TrendHandler::TrendFileRecorder   *m_trendFileRecorder;
     QHttpServer m_server;
 

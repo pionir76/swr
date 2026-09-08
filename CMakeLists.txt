@@ -25,7 +25,6 @@ string(TIMESTAMP SR_LAST_UPDATE_DATE "%Y-%m-%d")   # cmake 실행 시 자동 설
 set(SR_CONFIG_FILE       "/etc/swr/config.json"              CACHE STRING "Config file path")
 set(SR_DB_FILE           "/var/lib/swr/smartroute.db"        CACHE STRING "Database file path")
 set(SR_LOG_FILE          "/var/log/swr/smartroute_log.db"    CACHE STRING "Log database file path")
-set(SR_TREND_FILE        "/var/lib/swr/trend.db"             CACHE STRING "Trend database file path")
 set(SR_RESTORE_TEMP_DIR  "/tmp/swr_restore"                  CACHE STRING "Restore temp directory")
 set(SR_TFILE_DIR         "/trend_data"                       CACHE STRING "Trend file storage directory")
 
@@ -38,7 +37,6 @@ set(SR_API_PORT      8080                 CACHE STRING "Qt HTTP API port")
 message(STATUS "SR_CONFIG_FILE      : ${SR_CONFIG_FILE}")
 message(STATUS "SR_DB_FILE          : ${SR_DB_FILE}")
 message(STATUS "SR_LOG_FILE         : ${SR_LOG_FILE}")
-message(STATUS "SR_TREND_FILE       : ${SR_TREND_FILE}")
 message(STATUS "SR_RESTORE_TEMP_DIR : ${SR_RESTORE_TEMP_DIR}")
 message(STATUS "SR_TFILE_DIR        : ${SR_TFILE_DIR}")
 
@@ -103,9 +101,6 @@ add_executable(swr
   maintenance/BackupModels.h
   maintenance/BackupManager.h maintenance/BackupManager.cpp
   maintenance/RestoreManager.h maintenance/RestoreManager.cpp
-  trend/TrendDatabase.h trend/TrendDatabase.cpp
-  trend/TrendSampler.h  trend/TrendSampler.cpp
-
   TrendHandler/TrendFileWriter.h   TrendHandler/TrendFileWriter.cpp
   TrendHandler/TrendFileRecorder.h TrendHandler/TrendFileRecorder.cpp
   TrendHandler/TrendFileReader.h   TrendHandler/TrendFileReader.cpp
@@ -130,7 +125,6 @@ target_compile_definitions(swr PRIVATE
     SR_CONFIG_FILE="${SR_CONFIG_FILE}"
     SR_DB_FILE="${SR_DB_FILE}"
     SR_LOG_FILE="${SR_LOG_FILE}"
-    SR_TREND_FILE="${SR_TREND_FILE}"
     SR_RESTORE_TEMP_DIR="${SR_RESTORE_TEMP_DIR}"
     SR_TFILE_DIR="${SR_TFILE_DIR}"
 

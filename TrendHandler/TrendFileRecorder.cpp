@@ -44,12 +44,14 @@ bool TrendFileRecorder::start(const TrendConfig &config, QString &error)
     TndWriterConfig wcfg;
     buildWriterConfig(config, wcfg);
 
-    if (!m_writer.open(path, wcfg, error))
+    // open() must use the same 'now' so filename and STIME header match exactly
+    if (!m_writer.open(path, wcfg, now, error))
         return false;
 
     m_channelIds.clear();
-    for (const TrendChannelConfig &ch : config.channels)
-        m_channelIds.append(ch.regId);
+    const int chCnt = qMin(config.channels.size(), 16);  // guard: never exceed values[16]
+    for (int i = 0; i < chCnt; ++i)
+        m_channelIds.append(config.channels[i].regId);
 
     m_freq      = config.sampleIntervalSec;
     m_startTime = now;

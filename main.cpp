@@ -13,8 +13,6 @@
 #include "api/ApiServer.h"
 #include "utils/SystemMonitor.h"
 #include "modbus_server/ModbusTcpServer.h"
-#include "trend/TrendDatabase.h"
-#include "trend/TrendSampler.h"
 #include "TrendHandler/TrendFileRecorder.h"
 
 // ---------------------------------------------------------------------------
@@ -243,40 +241,6 @@ int main(int argc, char *argv[])
         3);
 
     //-----------------------------------------------------------------//
-    // Open Trend Database
-    //-----------------------------------------------------------------//
-    Trend::TrendDatabase trendDb;
-    {
-        const QString dbTrendFilePath = QStringLiteral(SR_TREND_FILE);
-        QString trendError;
-        if (!trendDb.open(dbTrendFilePath, trendError)){
-            Util::Logger::error(QStringLiteral("Failed to open trend DB: %1").arg(trendError));
-        }
-        else{
-            Util::Logger::info(QStringLiteral("Trend database opened."));
-        }
-    }
-
-    //-----------------------------------------------------------------//
-    // Start Trend Sampler
-    //-----------------------------------------------------------------//
-    Trend::TrendSampler trendSampler(registerTable.get(), &trendDb);
-    trendSampler.applyConfig(config.trend);
-
-    //-----------------------------------------------------------------//
-    // Cleanup expired trend data every hour. 
-    // Not clear right now(After 1 hour, purge expired data)
-    // trend_data → 1year expired data purge
-    // trend_data_5m → 3year expired data purge
-    // trend_data_10m → 5year expired data purge
-    //-----------------------------------------------------------------//
-    QTimer trendPurgeTimer;
-    QObject::connect(&trendPurgeTimer, &QTimer::timeout, [&trendDb]() {
-        trendDb.purgeExpired();
-    });
-    trendPurgeTimer.start(3600 * 1000);
-
-    //-----------------------------------------------------------------//
     // Create Trend File Recorder (start/stop controlled via API)
     //-----------------------------------------------------------------//
     TrendHandler::TrendFileRecorder trendFileRecorder(registerTable.get());
@@ -289,8 +253,6 @@ int main(int argc, char *argv[])
                              deviceList,
                              &pollingManager,
                              &systemMonitor,
-                             &trendDb,
-                             &trendSampler,
                              &trendFileRecorder);
 
     QString apiError;
