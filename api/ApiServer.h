@@ -114,6 +114,8 @@ private:
     QHttpServerResponse handlePutSystemNtp(const QHttpServerRequest &request);
     QHttpServerResponse handlePutSystemTimezone(const QHttpServerRequest &request);
     QHttpServerResponse handlePutSystemTime(const QHttpServerRequest &request);
+    QHttpServerResponse handleGetSystemLanguage(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutSystemLanguage(const QHttpServerRequest &request);
 
     // Trend Config (채널/샘플간격 설정 — TrendFileRecorder 에서 읽음)
     QHttpServerResponse handleGetTrendConfig(const QHttpServerRequest &request);

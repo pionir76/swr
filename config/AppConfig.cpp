@@ -45,6 +45,7 @@ AppConfig factoryDefaultConfig()
 
     cfg.system.hostname  = QStringLiteral("smartroute");
     cfg.system.ntpServer = QStringLiteral("pool.ntp.org");
+    cfg.system.language  = QStringLiteral("ko");
 
     cfg.modbusServer.enabled = false;
     cfg.modbusServer.port    = 502;
@@ -124,6 +125,7 @@ AppConfig loadConfig(const QString &filePath)
     const QJsonObject sys = root.value(QLatin1String("system")).toObject();
     config.system.hostname  = sys.value(QLatin1String("hostname")).toString(QStringLiteral("smartroute"));
     config.system.ntpServer = sys.value(QLatin1String("ntpServer")).toString(QStringLiteral("pool.ntp.org"));
+    config.system.language  = sys.value(QLatin1String("language")).toString(QStringLiteral("ko"));
 
     // modbus_server
     const QJsonObject mbs = root.value(QLatin1String("modbus_server")).toObject();
@@ -200,6 +202,7 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     QJsonObject sys;
     sys[QLatin1String("hostname")]  = config.system.hostname;
     sys[QLatin1String("ntpServer")] = config.system.ntpServer;
+    sys[QLatin1String("language")]  = config.system.language;
 
     QJsonObject mbs;
     mbs[QLatin1String("enabled")] = config.modbusServer.enabled;

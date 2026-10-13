@@ -27,6 +27,7 @@ struct NetInterfaceConfig {
 struct SysSettings {
     QString hostname  = QStringLiteral("smartroute");
     QString ntpServer = QStringLiteral("pool.ntp.org");
+    QString language  = QStringLiteral("ko");
 };
 
 struct ModbusServerConfig {

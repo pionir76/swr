@@ -209,6 +209,10 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePutSystemTimezone(req); });
     m_server.route("/api/system/time", QHttpServerRequest::Method::Put,
                    [this](const QHttpServerRequest &req) { return handlePutSystemTime(req); });
+    m_server.route("/api/system/language", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetSystemLanguage(req); });
+    m_server.route("/api/system/language", QHttpServerRequest::Method::Put,
+                   [this](const QHttpServerRequest &req) { return handlePutSystemLanguage(req); });
 
     m_server.route("/api/trend/config", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetTrendConfig(req); });
@@ -2796,6 +2800,56 @@ QHttpServerResponse ApiServer::handlePutSystemTime(const QHttpServerRequest &req
     QJsonObject resp;
     resp[QLatin1String("ok")]        = true;
     resp[QLatin1String("localTime")] = QDateTime::currentDateTime().toString(Qt::ISODate);
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/system/language  (no auth required)
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetSystemLanguage(const QHttpServerRequest &request)
+{
+    Q_UNUSED(request)
+    const AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    QJsonObject resp;
+    resp[QLatin1String("language")] = config.system.language;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/system/language  (ManagerOrAbove)
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePutSystemLanguage(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject() || !doc.object().contains(QLatin1String("language"))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing 'language' field");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QString lang = doc.object().value(QLatin1String("language")).toString().trimmed();
+    static const QStringList kAllowed = {
+        QStringLiteral("ko"), QStringLiteral("en"),
+        QStringLiteral("ja"), QStringLiteral("zh")
+    };
+    if (!kAllowed.contains(lang)) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("Invalid language. Allowed: ko, en, ja, zh");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
+    config.system.language = lang;
+    QString saveErr;
+    if (!saveConfig(QStringLiteral(SR_CONFIG_FILE), config, saveErr)) {
+        QJsonObject e; e[QLatin1String("error")] = saveErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]       = true;
+    resp[QLatin1String("language")] = lang;
     return QHttpServerResponse(resp);
 }
 

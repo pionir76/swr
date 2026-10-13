@@ -1010,7 +1010,38 @@ NTP 활성 여부와 무관하게 적용됩니다.
 
 ---
 
-## 11. 트렌드 설정
+## 11. 언어 설정
+
+### GET /api/system/language
+권한: `없음 (인증 불필요)`
+
+**응답** 200:
+```json
+{ "language": "ko" }
+```
+
+### PUT /api/system/language
+권한: `ManagerOrAbove`
+
+**요청 바디:**
+```json
+{ "language": "ko" }
+```
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `language` | string | ✅ | 언어 코드. 허용값: `"ko"` \| `"en"` \| `"ja"` \| `"zh"` |
+
+**응답** 200:
+```json
+{ "ok": true, "language": "ko" }
+```
+
+**에러** 400: `language` 필드 누락 또는 허용되지 않는 값
+
+---
+
+## 12. 트렌드 설정 (채널 구성)
 
 ### GET /api/trend/config
 권한: `Any`
@@ -1065,7 +1096,7 @@ NTP 활성 여부와 무관하게 적용됩니다.
 
 ---
 
-## 12. 트렌드 파일 (레코딩)
+## 13. 트렌드 파일 (레코딩)
 
 ### POST /api/tfile/start
 권한: `Any`
@@ -1190,7 +1221,7 @@ Content-Type: `application/octet-stream`
 
 ---
 
-## 13. 유지보수
+## 14. 유지보수
 
 ### GET /api/maintenance/backup
 권한: `AdminOnly`
