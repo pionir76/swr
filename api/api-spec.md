@@ -1,6 +1,6 @@
 # SmartRoute REST API 명세
 
-> 최종 수정: 2026-10-13  
+> 최종 수정: 2026-10-13 (프로토콜·타입 문자열 정정, byteOrder·unifiedAddress 범위 수정)  
 > Base URL: `http://<device-ip>:8080`  
 > 응답 형식: `application/json` (바이너리 응답 제외)
 
@@ -103,7 +103,7 @@
       "name": "PLC-1",
       "deviceCode": "DEV01",
       "connType": "serial",
-      "protocol": "modbus-rtu",
+      "protocol": "modbus_rtu",
       "state": "ok",
       "lastPollDurationMs": 45,
       "consecutiveErrors": 0,
@@ -173,7 +173,7 @@
       "name": "PLC-1",
       "displayName": "PLC 1번",
       "connType": "serial",
-      "protocol": "modbus-rtu",
+      "protocol": "modbus_rtu",
       "ipAddress": "",
       "tcpPort": 502,
       "slaveId": 1,
@@ -187,8 +187,8 @@
 ```
 
 > `connType`: `"serial"` | `"tcp"`  
-> `protocol`: `"modbus-rtu"` | `"modbus-tcp"` | `"modbus-ascii"` | `"pclink"` | `"pclink-sum"`  
-> `byteOrder`: `"big"` | `"little"` | `"big-word-swap"` | `"little-word-swap"`
+> `protocol`: `"modbus_rtu"` | `"modbus_tcp"` | `"modbus_ascii"` | `"pclink"` | `"pclink_sum"`  
+> `byteOrder`: `"big"` | `"little"` | `"default"`
 
 ---
 
@@ -225,7 +225,7 @@
   "name": "PLC-1",
   "displayName": "PLC 1번",
   "connType": "serial",
-  "protocol": "modbus-rtu",
+  "protocol": "modbus_rtu",
   "ipAddress": "",
   "tcpPort": 502,
   "slaveId": 1,
@@ -237,7 +237,7 @@
 ```
 
 > 필수: `name`, `byteOrder`(`"big"` 또는 `"little"` 필수, `"default"` 불가)  
-> `protocol` 생략 시: `connType=serial` → `modbus-rtu`, `connType=tcp` → `modbus-tcp`
+> `protocol` 생략 시: `connType=serial` → `modbus_rtu`, `connType=tcp` → `modbus_tcp`
 
 **Response 201**
 ```json
@@ -284,7 +284,7 @@
       "tagName": "TEMP_01",
       "displayName": "온도 1번",
       "localAddress": 100,
-      "type": "holding",
+      "type": "holding_register",
       "readOnly": false,
       "length": 1,
       "unit": "℃",
@@ -300,8 +300,8 @@
 }
 ```
 
-> `type`: `"coil"` | `"discrete"` | `"input"` | `"holding"`  
-> `byteOrder`: `"default"` | `"big"` | `"little"` | `"big-word-swap"` | `"little-word-swap"`
+> `type`: `"coil"` | `"discrete_input"` | `"input_register"` | `"holding_register"`  
+> `byteOrder`: `"default"` | `"big"` | `"little"`
 
 ---
 
@@ -314,7 +314,7 @@
   "tagName": "TEMP_01",
   "displayName": "온도 1번",
   "localAddress": 100,
-  "type": "holding",
+  "type": "holding_register",
   "readOnly": false,
   "length": 1,
   "unit": "℃",
@@ -329,14 +329,14 @@
 ```
 
 > 필수: `tagName`, `type`  
-> `unifiedAddress` 생략 시 자동 할당. 수동 지정 시 `>= 10000` 이어야 함.
+> `unifiedAddress` 생략 시 자동 할당 (0–4999). 수동 지정 시 `>= 5000` 이어야 함.
 
 **Response 201**
 ```json
 {
   "tagName": "TEMP_01",
   "localAddress": 100,
-  "type": "holding",
+  "type": "holding_register",
   "unifiedAddress": 1001
 }
 ```
@@ -415,7 +415,7 @@
       "displayName": "온도 1번",
       "deviceId": 1,
       "localAddress": 100,
-      "sourceType": "holding",
+      "sourceType": "holding_register",
       "unit": "℃",
       "scaledValue": 25.3,
       "minValue": -50.0,
@@ -1158,7 +1158,7 @@ NTP 활성 여부와 무관하게 적용됩니다.
 Content-Type: `application/octet-stream`  
 **Response**: `.tnd` 파일 메인 헤더 512 bytes (binary)
 
-> 파싱 방법은 `TrendHandler/file_based_plan.md` 참조
+> 파싱 방법은 `TrendHandler/` 폴더의 헤더 포맷 또는 `api-spec.md` 내 tfile 섹션 참조
 
 ---
 
