@@ -126,12 +126,12 @@ void TrendFileRecorder::onTimer()
 
     QString err;
     if (!m_writer.appendRecord(values, err)) {
-        if (err == QLatin1String("capacity_exceeded")) {
-            stop();
+        const bool capacityExceeded = (err == QLatin1String("capacity_exceeded"));
+        stop();
+        if (capacityExceeded)
             Util::Logger::error(QStringLiteral("TrendFileRecorder: capacity exceeded, recording stopped."));
-        } else {
-            Util::Logger::error(QStringLiteral("TrendFileRecorder: write error: %1").arg(err));
-        }
+        else
+            Util::Logger::error(QStringLiteral("TrendFileRecorder: write error, recording stopped: %1").arg(err));
     }
 }
 

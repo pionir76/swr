@@ -20,6 +20,7 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
   │ DeviceDB    │──▶ SQLite
   │ ApiServer   │──▶ HTTP :8080 (REST API)
   │ ModbusTCP   │──▶ Modbus TCP Server :502
+  │ TrendHandler│──▶ /trend_data/*.tnd (바이너리 파일)
   └─────────────┘
         │
         │  lighttpd :80 (정적 파일 + API 프록시)
@@ -93,7 +94,22 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 ### 사용자 관리
 - 역할 기반 접근 제어 (admin / manager / user)
 - 세션 기반 인증, 로그인 실패 잠금, 자동 로그아웃
+- 보안 정책 설정 (최대 로그인 실패 횟수, 세션 만료 시간, 최소 비밀번호 길이)
+- 로그인 이력 조회 및 삭제
 - admin 계정 삭제 불가 (id=0 고정)
+
+### 시스템 시간 설정
+- 현재 시각 / NTP 상태 / 타임존 조회
+- NTP 활성화 / 비활성화
+- 타임존 변경 (NTP 활성 시에만 적용)
+- 수동 시각 설정 (NTP 비활성 시에만 허용) + 외부 RTC(hwclock) 반영
+
+### 트렌드 레코딩 (파일 기반)
+- 최대 16채널, 샘플 주기 10 / 30 / 60초 선택
+- 바이너리 `.tnd` 파일 포맷 (512 bytes 헤더 + 1024 bytes 블록)
+- 최대 파일 크기 4 GB (초과 시 자동 중단)
+- 녹화 시작 / 중지는 API(`POST /api/tfile/start|stop`)로만 제어
+- 저장 파일 목록 조회, 개별 삭제, 헤더 / 최신 레코드 / 구간 데이터 읽기
 
 ### 백업 / 복원
 - 전체 설정을 ZIP 파일로 다운로드 (장비, 레지스터, 사용자, 시스템 설정 포함)
@@ -118,36 +134,117 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 
 ## REST API 목록
 
+### 인증 / 세션
+
 | Method | Endpoint | 설명 |
 |---|---|---|
 | POST | `/api/login` | 로그인 |
 | POST | `/api/logout` | 로그아웃 |
 | GET | `/api/session` | 세션 확인 |
+
+### 대시보드
+
+| Method | Endpoint | 설명 |
+|---|---|---|
 | GET | `/api/dashboard` | 대시보드 요약 |
-| GET/POST | `/api/devices` | 장비 목록 / 등록 |
-| GET/PUT/DELETE | `/api/devices/<id>` | 장비 조회 / 수정 / 삭제 |
-| GET/POST | `/api/devices/<id>/registers` | 레지스터 목록 / 등록 |
+
+### 폴링 제어
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/polling/status` | 폴링 상태 |
+| POST | `/api/polling/start` | 폴링 시작 |
+| POST | `/api/polling/stop` | 폴링 중지 |
+
+### 장비 / 레지스터
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/devices` | 장비 목록 |
+| POST | `/api/devices` | 장비 등록 |
+| GET | `/api/devices/status` | 장비별 폴링 상태 |
+| PUT | `/api/devices/<id>` | 장비 수정 |
+| DELETE | `/api/devices/<id>` | 장비 삭제 |
+| GET | `/api/devices/<id>/registers` | 레지스터 목록 |
+| POST | `/api/devices/<id>/registers` | 레지스터 등록 |
 | PUT | `/api/registers/<id>` | 레지스터 수정 |
 | DELETE | `/api/registers/<id>` | 레지스터 삭제 |
 | POST | `/api/registers/<id>/write` | 레지스터 쓰기 |
 | GET | `/api/registers/unified-id/check` | 통합 ID 사용 여부 확인 |
 | GET | `/api/registers/realtime` | 실시간 레지스터 값 |
-| GET | `/api/polling/status` | 폴링 상태 |
-| POST | `/api/polling/start` | 폴링 시작 |
-| POST | `/api/polling/stop` | 폴링 중지 |
-| GET/PUT | `/api/config/system` | 시스템 설정 |
-| GET/PUT | `/api/config/network` | 네트워크 설정 |
-| GET/PUT | `/api/config/serial` | RS485 설정 |
-| GET/PUT | `/api/config/modbus-server` | Modbus TCP 서버 설정 |
+
+### 사용자 관리
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/users` | 사용자 목록 |
+| POST | `/api/users` | 사용자 등록 |
+| PUT | `/api/users/<username>` | 사용자 정보 수정 |
+| DELETE | `/api/users/<username>` | 사용자 삭제 |
+| PUT | `/api/users/<username>/password` | 비밀번호 변경 |
+| PUT | `/api/users/<username>/status` | 계정 활성 / 잠금 변경 |
+| GET | `/api/users/login-history` | 로그인 이력 조회 |
+| DELETE | `/api/users/login-history` | 로그인 이력 삭제 |
+| GET | `/api/users/security-policy` | 보안 정책 조회 |
+| PUT | `/api/users/security-policy` | 보안 정책 수정 |
+
+### 시스템 설정
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/config` | 전체 설정 조회 |
+| POST | `/api/config/reset` | 설정 초기화 |
+| PUT | `/api/config/network` | 네트워크 설정 변경 |
+| PUT | `/api/config/serial` | RS485 설정 변경 |
+| PUT | `/api/config/system` | 시스템 설정 변경 |
+| PUT | `/api/config/modbus-server` | Modbus TCP 서버 설정 변경 |
+
+### 시스템 정보 / 제어
+
+| Method | Endpoint | 설명 |
+|---|---|---|
 | GET | `/api/system/info` | 시스템 정보 + 요약 |
-| GET | `/api/system/resources` | 리소스 모니터링 |
+| GET | `/api/system/resources` | 리소스 모니터링 (CPU/메모리/디스크/네트워크) |
 | POST | `/api/system/restart` | 애플리케이션 재시작 |
-| GET/POST/DELETE | `/api/users` | 사용자 관리 |
-| GET | `/api/logs` | 시스템 로그 조회 |
+| GET | `/api/system/time` | 현재 시각 / NTP 상태 / 타임존 조회 |
+| PUT | `/api/system/ntp` | NTP 활성화 / 비활성화 |
+| PUT | `/api/system/timezone` | 타임존 변경 |
+| PUT | `/api/system/time` | 수동 시각 설정 (NTP 비활성 시에만) |
+
+### 트렌드 설정
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/trend/config` | 트렌드 채널 / 샘플 주기 조회 |
+| PUT | `/api/trend/config` | 트렌드 채널 / 샘플 주기 변경 |
+
+### 트렌드 파일
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| POST | `/api/tfile/start` | 녹화 시작 (새 .tnd 파일 생성) |
+| POST | `/api/tfile/stop` | 녹화 중지 |
+| GET | `/api/tfile/status` | 녹화 상태 조회 |
+| GET | `/api/tfile/files` | 저장된 파일 목록 |
+| DELETE | `/api/tfile/files/<filename>` | 파일 삭제 |
+| GET | `/api/tfile/header?file=` | 파일 헤더 512 bytes |
+| GET | `/api/tfile/latest?file=` | 최신 레코드 32 bytes |
+| GET | `/api/tfile/sample?file=&from=&to=&step=` | 구간 데이터 (바이너리) |
+
+### 유지보수
+
+| Method | Endpoint | 설명 |
+|---|---|---|
 | GET | `/api/maintenance/backup` | 백업 ZIP 다운로드 |
 | POST | `/api/maintenance/restore/validate` | 복원 파일 검증 |
 | POST | `/api/maintenance/restore/apply` | 복원 적용 |
 | POST | `/api/maintenance/factory-reset` | 공장 초기화 |
+
+### 로그
+
+| Method | Endpoint | 설명 |
+|---|---|---|
+| GET | `/api/logs` | 시스템 로그 조회 |
 
 ---
 
@@ -155,13 +252,15 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 
 ```cmake
 # 주요 빌드 옵션 (cmake -D<KEY>=<VALUE>)
-SR_CONFIG_FILE       # 설정 파일 경로       (기본: /etc/swr/config.json)
-SR_DB_FILE           # DB 파일 경로         (기본: /var/lib/swr/smartroute.db)
-SR_LOG_FILE          # 로그 DB 경로         (기본: /var/log/swr/smartroute_log.db)
-SR_API_PORT          # API 서버 포트        (기본: 8080)
-SR_MAX_DEVICES       # 최대 장비 수         (기본: 20)
-SR_MAX_LOG_LINES     # 최대 로그 보관 건수  (기본: 1000)
-SR_SCHEMA_VERSION    # DB 스키마 버전       (백업/복원 호환성 검사 키)
+SR_CONFIG_FILE       # 설정 파일 경로          (기본: /etc/swr/config.json)
+SR_DB_FILE           # DB 파일 경로            (기본: /var/lib/swr/smartroute.db)
+SR_LOG_FILE          # 로그 DB 경로            (기본: /var/log/swr/smartroute_log.db)
+SR_TFILE_DIR         # 트렌드 파일 저장 경로   (기본: /trend_data)
+SR_RESTORE_TEMP_DIR  # 복원 임시 디렉터리      (기본: /tmp/swr_restore)
+SR_API_PORT          # API 서버 포트           (기본: 8080)
+SR_MAX_DEVICES       # 최대 장비 수            (기본: 20)
+SR_MAX_LOG_LINES     # 최대 로그 보관 건수     (기본: 1000)
+SR_SCHEMA_VERSION    # DB 스키마 버전          (백업/복원 호환성 검사 키)
 ```
 
 ---
@@ -173,7 +272,7 @@ swr/
 ├── main.cpp
 ├── CMakeLists.txt
 ├── api/                        # REST API 서버 (QHttpServer)
-│   ├── ApiServer.h/.cpp
+│   └── ApiServer.h/.cpp
 ├── config/                     # 설정 로드/저장
 │   ├── AppConfig.h/.cpp
 │   └── SystemConfig.h/.cpp
@@ -189,12 +288,20 @@ swr/
 │   ├── RestoreManager.h/.cpp
 │   └── BackupModels.h
 ├── modbus_server/              # Modbus TCP 서버
-│   ├── ModbusTcpServer.h/.cpp
-│   └── RegisterAddressMap.h/.cpp
+│   └── ModbusTcpServer.h/.cpp
+├── TrendHandler/               # 트렌드 파일 레코딩
+│   ├── TrendFileWriter.h/.cpp  # .tnd 파일 생성 / 레코드 append
+│   ├── TrendFileRecorder.h/.cpp# 레코딩 생명주기 (QTimer 기반)
+│   ├── TrendFileReader.h/.cpp  # 헤더 / latest / sample 읽기
+│   ├── file_based_plan.md      # .tnd 파일 포맷 및 API 사양
+│   └── todo.md                 # 개발 완료 체크리스트
 ├── utils/                      # 공통 유틸리티
 │   ├── Logger.h/.cpp           # 비동기 SQLite 로거
 │   ├── SystemMonitor.h/.cpp    # 시스템 리소스 모니터링
 │   └── NetworkConfigurator.h/.cpp
+└── scripts/                    # 빌드/배포 스크립트
+    ├── redeploy.sh             # 빌드 + 배포 + 서비스 재시작
+    └── deploy.sh
 ```
 
 ---
@@ -206,6 +313,7 @@ swr/
 | `/etc/swr/config.json` | 시스템 설정 파일 |
 | `/var/lib/swr/smartroute.db` | 장비/레지스터/사용자 DB |
 | `/var/log/swr/smartroute_log.db` | 시스템 로그 DB |
+| `/trend_data/*.tnd` | 트렌드 레코딩 파일 |
 | `/var/www/html/` | 웹 UI 정적 파일 (lighttpd) |
 | `/tmp/swr_restore/` | 복원 임시 세션 |
 
