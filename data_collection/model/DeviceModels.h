@@ -161,6 +161,23 @@ struct WriteRequest {
     int retryCount = 3;
 };
 
+struct HmiTag {
+    QString id;                    // PK (영숫자+_+-, max 64)
+    QString name;
+    int     registerId  = -1;      // FK → registers.id
+    // optional overrides; empty / hasXxx=false means inherit from register
+    QString unit;
+    bool    hasMin      = false;
+    double  minValue    = 0.0;
+    bool    hasMax      = false;
+    double  maxValue    = 0.0;
+    bool    hasDecimals = false;
+    int     decimals    = 0;
+    QString access;                // "" = inherit, "r", "rw"
+    QString createdAt;
+    QString updatedAt;
+};
+
 struct LoginHistoryEntry {
     qint64  id = -1;
     QString timestamp;

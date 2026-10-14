@@ -54,6 +54,13 @@ public:
                                                       QString &error) const;
     bool deleteLoginHistory(const QString &username, QString &error);
 
+    // HMI Tags
+    QList<Model::HmiTag> loadHmiTags(QString &error) const;
+    Model::HmiTag        loadHmiTag(const QString &id, bool &found, QString &error) const;
+    bool insertHmiTag(const Model::HmiTag &tag, QString &error);
+    bool updateHmiTag(const Model::HmiTag &tag, QString &error);
+    bool deleteHmiTag(const QString &id, QString &error);
+
     // Restore
     bool restoreData(bool restoreDevices,
                      const QJsonArray &devices,

@@ -119,6 +119,7 @@ bool DeviceDatabase::resetSchema(QString& error)
 
         QStringLiteral("DROP TABLE IF EXISTS trends"),
         QStringLiteral("DROP TABLE IF EXISTS hmi_layouts"),
+        QStringLiteral("DROP TABLE IF EXISTS hmi_tags"),
         QStringLiteral("DROP TABLE IF EXISTS sessions")
     };
 
@@ -286,6 +287,24 @@ bool DeviceDatabase::initSchema(QString& error)
         QStringLiteral(
             "CREATE INDEX IF NOT EXISTS idx_login_history_username "
             "ON login_history(username)"
+        ),
+
+        //-----------------------------------------------------------//
+        // HMI Tags
+        //-----------------------------------------------------------//
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS hmi_tags ("
+            "  id          TEXT    PRIMARY KEY,"
+            "  name        TEXT    NOT NULL,"
+            "  register_id INTEGER NOT NULL REFERENCES registers(id) ON DELETE CASCADE,"
+            "  unit        TEXT,"
+            "  min_value   REAL,"
+            "  max_value   REAL,"
+            "  decimals    INTEGER,"
+            "  access      TEXT    CHECK(access IS NULL OR access IN ('r', 'rw')),"
+            "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "  updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP"
+            ")"
         ),
 
     };
@@ -1322,6 +1341,108 @@ bool DeviceDatabase::factoryReset(QString &error)
         return false;
     }
 
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// HMI Tags
+// ---------------------------------------------------------------------------
+static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
+{
+    Model::HmiTag tag;
+    tag.id         = q.value(0).toString();
+    tag.name       = q.value(1).toString();
+    tag.registerId = q.value(2).toInt();
+
+    if (!q.value(3).isNull()) tag.unit        = q.value(3).toString();
+    if (!q.value(4).isNull()) { tag.hasMin    = true; tag.minValue  = q.value(4).toDouble(); }
+    if (!q.value(5).isNull()) { tag.hasMax    = true; tag.maxValue  = q.value(5).toDouble(); }
+    if (!q.value(6).isNull()) { tag.hasDecimals = true; tag.decimals = q.value(6).toInt();   }
+    if (!q.value(7).isNull()) tag.access      = q.value(7).toString();
+
+    tag.createdAt  = q.value(8).toString();
+    tag.updatedAt  = q.value(9).toString();
+    return tag;
+}
+
+QList<Model::HmiTag> DeviceDatabase::loadHmiTags(QString &error) const
+{
+    QList<Model::HmiTag> list;
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT id,name,register_id,unit,min_value,max_value,decimals,access,created_at,updated_at "
+            "FROM hmi_tags ORDER BY id"))) {
+        error = q.lastError().text();
+        return list;
+    }
+    while (q.next())
+        list.append(hmiTagFromQuery(q));
+    return list;
+}
+
+Model::HmiTag DeviceDatabase::loadHmiTag(const QString &id, bool &found, QString &error) const
+{
+    found = false;
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT id,name,register_id,unit,min_value,max_value,decimals,access,created_at,updated_at "
+        "FROM hmi_tags WHERE id=?"));
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return {}; }
+    if (!q.next())  return {};
+    found = true;
+    return hmiTagFromQuery(q);
+}
+
+bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
+{
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO hmi_tags (id,name,register_id,unit,min_value,max_value,decimals,access) "
+        "VALUES (?,?,?,?,?,?,?,?)"));
+    q.addBindValue(tag.id);
+    q.addBindValue(tag.name);
+    q.addBindValue(tag.registerId);
+    q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
+    q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
+    q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
+    q.addBindValue(tag.hasDecimals       ? QVariant(tag.decimals)  : QVariant(QMetaType(QMetaType::Int)));
+    q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
+    if (!q.exec()) { error = q.lastError().text(); return false; }
+    return true;
+}
+
+bool DeviceDatabase::updateHmiTag(const Model::HmiTag &tag, QString &error)
+{
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "UPDATE hmi_tags SET name=?,register_id=?,unit=?,min_value=?,max_value=?,decimals=?,access=?,"
+        "updated_at=CURRENT_TIMESTAMP WHERE id=?"));
+    q.addBindValue(tag.name);
+    q.addBindValue(tag.registerId);
+    q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
+    q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
+    q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
+    q.addBindValue(tag.hasDecimals       ? QVariant(tag.decimals)  : QVariant(QMetaType(QMetaType::Int)));
+    q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
+    q.addBindValue(tag.id);
+    if (!q.exec()) { error = q.lastError().text(); return false; }
+    if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(tag.id); return false; }
+    return true;
+}
+
+bool DeviceDatabase::deleteHmiTag(const QString &id, QString &error)
+{
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("DELETE FROM hmi_tags WHERE id=?"));
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return false; }
+    if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(id); return false; }
     return true;
 }
 

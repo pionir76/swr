@@ -117,6 +117,15 @@ private:
     QHttpServerResponse handleGetSystemLanguage(const QHttpServerRequest &request);
     QHttpServerResponse handlePutSystemLanguage(const QHttpServerRequest &request);
 
+    // HMI Tags
+    QHttpServerResponse handleGetHmiTags(const QHttpServerRequest &request);
+    QHttpServerResponse handlePostHmiTag(const QHttpServerRequest &request);
+    QHttpServerResponse handleGetHmiTag(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handlePutHmiTag(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handleDeleteHmiTag(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handleGetHmiValues(const QHttpServerRequest &request);
+    QHttpServerResponse handlePostHmiWrite(const QHttpServerRequest &request);
+
     // Trend Config (채널/샘플간격 설정 — TrendFileRecorder 에서 읽음)
     QHttpServerResponse handleGetTrendConfig(const QHttpServerRequest &request);
     QHttpServerResponse handlePutTrendConfig(const QHttpServerRequest &request);

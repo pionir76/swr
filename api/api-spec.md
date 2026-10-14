@@ -1221,7 +1221,129 @@ Content-Type: `application/octet-stream`
 
 ---
 
-## 14. 유지보수
+## 14. HMI 태그
+
+레지스터 `tagName`과 별도의 독립된 네임스페이스. 레지스터를 "소스"로 느슨하게 참조하며, 레지스터 이름이 바뀌어도 HMI 화면은 영향받지 않음.
+
+### 데이터 모델
+
+```json
+{
+  "id": "TK1_LEVEL",
+  "name": "1번 탱크 수위",
+  "source": { "registerId": 123 },
+  "unit": "%",
+  "min": 0.0,
+  "max": 100.0,
+  "decimals": 1,
+  "access": "r",
+  "createdAt": "2026-10-14T10:00:00",
+  "updatedAt": "2026-10-14T10:00:00"
+}
+```
+
+- `unit / min / max / decimals / access` 생략(null) 시 소스 레지스터 값에서 상속
+- `decimals` 생략 시 `scale`에서 자동 추론 (`scale=0.1 → 1`, `scale=0.01 → 2`, …)
+- `access`: `"r"` | `"rw"` — 레지스터 `readOnly` 상속 또는 오버라이드
+- `id` 허용 문자: 영숫자 + `_` + `-`, 최대 64자
+
+### GET /api/hmi/tags
+권한: `Any`
+
+**응답** 200:
+```json
+{ "tags": [ { ...HmiTag... } ] }
+```
+
+### POST /api/hmi/tags
+권한: `ManagerOrAbove`
+
+**요청 바디:**
+```json
+{
+  "id": "TK1_LEVEL",
+  "name": "1번 탱크 수위",
+  "source": { "registerId": 123 },
+  "unit": "%",
+  "min": 0.0,
+  "max": 100.0,
+  "decimals": 1,
+  "access": "r"
+}
+```
+`id / name / source.registerId` 필수, 나머지 선택
+
+**응답** 201: 생성된 HmiTag 객체  
+**에러** 400: 유효하지 않은 id 형식 / registerId 없음 / access 값 오류  
+**에러** 409: id 중복
+
+### GET /api/hmi/tags/{id}
+권한: `Any`
+
+**응답** 200: HmiTag 객체  
+**에러** 404
+
+### PUT /api/hmi/tags/{id}
+권한: `ManagerOrAbove`
+
+요청 바디: POST와 동일 (`id`는 URL에서 받음)
+
+**응답** 200: 수정된 HmiTag 객체  
+**에러** 404
+
+### DELETE /api/hmi/tags/{id}
+권한: `ManagerOrAbove`
+
+**응답** 200: `{ "ok": true }`  
+**에러** 404
+
+### GET /api/hmi/values?tags=A,B
+권한: `Any`
+
+`tags` 쿼리 파라미터 생략 시 전체 태그 반환
+
+**응답** 200:
+```json
+{
+  "ts": "2026-10-14T02:26:05Z",
+  "values": {
+    "TK1_LEVEL": {
+      "v": 56.9,
+      "q": "good",
+      "unit": "%",
+      "decimals": 1,
+      "access": "r"
+    }
+  }
+}
+```
+
+| `q` 값 | 의미 |
+|--------|------|
+| `"good"` | 마지막 폴링 경과 < 1.5× interval |
+| `"normal"` | 1.5× ~ 3× interval (응답 지연) |
+| `"bad"` | 3× 초과 또는 응답 없음 |
+
+`v`는 `bad` 상태이거나 아직 값이 없으면 `null`
+
+### POST /api/hmi/write
+권한: `ManagerOrAbove`
+
+**요청 바디:**
+```json
+{ "tag": "LEVEL_SP", "v": 75.0 }
+```
+
+coil 타입 레지스터는 `v`에 JSON boolean(`true`/`false`) 또는 숫자(`0`/`1`) 전달 가능.  
+서버가 엔지니어링 단위 `v`를 `raw = round(v / scale)`로 변환 후 기록.
+
+**응답** 202: `{ "ok": true, "tag": "LEVEL_SP" }`  
+**에러** 404: 태그 없음  
+**에러** 405: `access: "r"` 태그 쓰기 시도
+
+---
+
+## 15. 유지보수
 
 ### GET /api/maintenance/backup
 권한: `AdminOnly`

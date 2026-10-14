@@ -23,6 +23,7 @@
 #include <QMutexLocker>
 #include <QUuid>
 #include <QUrlQuery>
+#include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QProcess>
 #include <QTcpServer>
@@ -213,6 +214,22 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetSystemLanguage(req); });
     m_server.route("/api/system/language", QHttpServerRequest::Method::Put,
                    [this](const QHttpServerRequest &req) { return handlePutSystemLanguage(req); });
+
+    // HMI Tags
+    m_server.route("/api/hmi/tags", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetHmiTags(req); });
+    m_server.route("/api/hmi/tags", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostHmiTag(req); });
+    m_server.route("/api/hmi/tags/<arg>", QHttpServerRequest::Method::Get,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handleGetHmiTag(req, id); });
+    m_server.route("/api/hmi/tags/<arg>", QHttpServerRequest::Method::Put,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handlePutHmiTag(req, id); });
+    m_server.route("/api/hmi/tags/<arg>", QHttpServerRequest::Method::Delete,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handleDeleteHmiTag(req, id); });
+    m_server.route("/api/hmi/values", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetHmiValues(req); });
+    m_server.route("/api/hmi/write", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostHmiWrite(req); });
 
     m_server.route("/api/trend/config", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetTrendConfig(req); });
@@ -2801,6 +2818,355 @@ QHttpServerResponse ApiServer::handlePutSystemTime(const QHttpServerRequest &req
     resp[QLatin1String("ok")]        = true;
     resp[QLatin1String("localTime")] = QDateTime::currentDateTime().toString(Qt::ISODate);
     return QHttpServerResponse(resp);
+}
+
+// ===========================================================================
+// HMI Tags
+// ===========================================================================
+
+static int decimalsFromScale(double scale)
+{
+    if (scale <= 0.0 || scale >= 1.0 - 1e-9) return 0;
+    int d = 0;
+    double s = scale;
+    while (s < 1.0 - 1e-9 && d < 6) { s *= 10.0; ++d; }
+    return d;
+}
+
+static QJsonObject hmiTagToJson(const Model::HmiTag &t)
+{
+    QJsonObject o;
+    o[QLatin1String("id")]   = t.id;
+    o[QLatin1String("name")] = t.name;
+    QJsonObject src;
+    src[QLatin1String("registerId")] = t.registerId;
+    o[QLatin1String("source")] = src;
+    o[QLatin1String("unit")]     = t.unit.isEmpty()    ? QJsonValue()       : t.unit;
+    o[QLatin1String("min")]      = t.hasMin            ? QJsonValue(t.minValue) : QJsonValue();
+    o[QLatin1String("max")]      = t.hasMax            ? QJsonValue(t.maxValue) : QJsonValue();
+    o[QLatin1String("decimals")] = t.hasDecimals       ? QJsonValue(t.decimals) : QJsonValue();
+    o[QLatin1String("access")]   = t.access.isEmpty()  ? QJsonValue()       : t.access;
+    o[QLatin1String("createdAt")] = t.createdAt;
+    o[QLatin1String("updatedAt")] = t.updatedAt;
+    return o;
+}
+
+static bool parseHmiTagBody(const QJsonObject &body, Model::HmiTag &tag, QString &err)
+{
+    if (!body.contains(QLatin1String("name")) ||
+        !body.contains(QLatin1String("source"))) {
+        err = QStringLiteral("Missing required fields: name, source");
+        return false;
+    }
+    tag.name = body.value(QLatin1String("name")).toString().trimmed();
+    if (tag.name.isEmpty()) { err = QStringLiteral("'name' must not be empty"); return false; }
+
+    const QJsonObject src = body.value(QLatin1String("source")).toObject();
+    tag.registerId = src.value(QLatin1String("registerId")).toInt(-1);
+    if (tag.registerId < 0) { err = QStringLiteral("'source.registerId' is required"); return false; }
+
+    if (body.contains(QLatin1String("unit")))
+        tag.unit = body.value(QLatin1String("unit")).toString();
+    if (body.contains(QLatin1String("min")) && !body.value(QLatin1String("min")).isNull())
+        { tag.hasMin = true; tag.minValue = body.value(QLatin1String("min")).toDouble(); }
+    if (body.contains(QLatin1String("max")) && !body.value(QLatin1String("max")).isNull())
+        { tag.hasMax = true; tag.maxValue = body.value(QLatin1String("max")).toDouble(); }
+    if (body.contains(QLatin1String("decimals")) && !body.value(QLatin1String("decimals")).isNull())
+        { tag.hasDecimals = true; tag.decimals = body.value(QLatin1String("decimals")).toInt(); }
+    if (body.contains(QLatin1String("access"))) {
+        const QString acc = body.value(QLatin1String("access")).toString();
+        if (!acc.isEmpty() && acc != QLatin1String("r") && acc != QLatin1String("rw")) {
+            err = QStringLiteral("'access' must be 'r' or 'rw'");
+            return false;
+        }
+        tag.access = acc;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/tags
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiTags(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    QString dbErr;
+    const QList<Model::HmiTag> tags = m_db->loadHmiTags(dbErr);
+    if (!dbErr.isEmpty()) {
+        QJsonObject e; e[QLatin1String("error")] = dbErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+    QJsonArray arr;
+    for (const Model::HmiTag &t : tags)
+        arr.append(hmiTagToJson(t));
+    QJsonObject resp;
+    resp[QLatin1String("tags")] = arr;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hmi/tags
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostHmiTag(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+    const QString id = body.value(QLatin1String("id")).toString().trimmed();
+
+    static const QRegularExpression kIdPattern(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
+    if (!kIdPattern.match(id).hasMatch()) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("'id' must be 1–64 characters: letters, digits, _ or -");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    Model::HmiTag tag;
+    tag.id = id;
+    QString parseErr;
+    if (!parseHmiTagBody(body, tag, parseErr)) {
+        QJsonObject e; e[QLatin1String("error")] = parseErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    // Verify registerId exists
+    bool regFound = false;
+    m_deviceList->findByRegisterId(tag.registerId, regFound);
+    if (!regFound) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("Register not found: id=%1").arg(tag.registerId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    QString dbErr;
+    if (!m_db->insertHmiTag(tag, dbErr)) {
+        QJsonObject e; e[QLatin1String("error")] = dbErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+    }
+
+    bool found = false;
+    const Model::HmiTag created = m_db->loadHmiTag(id, found, dbErr);
+    return QHttpServerResponse(hmiTagToJson(created), QHttpServerResponse::StatusCode::Created);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/tags/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiTag(const QHttpServerRequest &request, const QString &id)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    QString dbErr;
+    bool found = false;
+    const Model::HmiTag tag = m_db->loadHmiTag(id, found, dbErr);
+    if (!found) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("HMI tag not found: %1").arg(id);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+    return QHttpServerResponse(hmiTagToJson(tag));
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/hmi/tags/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePutHmiTag(const QHttpServerRequest &request, const QString &id)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    QString dbErr;
+    bool found = false;
+    m_db->loadHmiTag(id, found, dbErr);
+    if (!found) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("HMI tag not found: %1").arg(id);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    Model::HmiTag tag;
+    tag.id = id;
+    QString parseErr;
+    if (!parseHmiTagBody(doc.object(), tag, parseErr)) {
+        QJsonObject e; e[QLatin1String("error")] = parseErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    bool regFound = false;
+    m_deviceList->findByRegisterId(tag.registerId, regFound);
+    if (!regFound) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("Register not found: id=%1").arg(tag.registerId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    if (!m_db->updateHmiTag(tag, dbErr)) {
+        QJsonObject e; e[QLatin1String("error")] = dbErr;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    bool ok = false;
+    const Model::HmiTag updated = m_db->loadHmiTag(id, ok, dbErr);
+    return QHttpServerResponse(hmiTagToJson(updated));
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/hmi/tags/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleDeleteHmiTag(const QHttpServerRequest &request, const QString &id)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    QString dbErr;
+    if (!m_db->deleteHmiTag(id, dbErr)) {
+        QJsonObject e; e[QLatin1String("error")] = dbErr;
+        const auto code = dbErr.contains(QLatin1String("not found"))
+                          ? QHttpServerResponse::StatusCode::NotFound
+                          : QHttpServerResponse::StatusCode::InternalServerError;
+        return QHttpServerResponse(e, code);
+    }
+    QJsonObject resp; resp[QLatin1String("ok")] = true;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/values?tags=A,B,C
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    const QUrlQuery query(request.url().query());
+    const QString tagParam = query.queryItemValue(QLatin1String("tags"));
+    const QStringList requested = tagParam.isEmpty()
+                                  ? QStringList()
+                                  : tagParam.split(QLatin1Char(','), Qt::SkipEmptyParts);
+
+    QString dbErr;
+    const QList<Model::HmiTag> allTags = m_db->loadHmiTags(dbErr);
+
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    QJsonObject values;
+
+    for (const Model::HmiTag &t : allTags) {
+        if (!requested.isEmpty() && !requested.contains(t.id))
+            continue;
+
+        bool regFound = false;
+        const Model::RegisterConfig reg = m_deviceList->findByRegisterId(t.registerId, regFound);
+        if (!regFound) continue;
+
+        const DataCollection::Model::RegisterState state = m_registerTable->state(reg.unifiedAddress);
+
+        // Compute quality
+        DataCollection::Model::DataQuality q = DataCollection::Model::DataQuality::Bad;
+        if (state.lastUpdated.isValid() && state.pollingIntervalMs > 0) {
+            const qint64 elapsed = state.lastUpdated.msecsTo(now);
+            if (elapsed < state.pollingIntervalMs * 3 / 2)
+                q = DataCollection::Model::DataQuality::Good;
+            else if (elapsed < state.pollingIntervalMs * 3)
+                q = DataCollection::Model::DataQuality::Normal;
+        }
+
+        // Effective decimals
+        int decimals = t.hasDecimals ? t.decimals : decimalsFromScale(reg.scale);
+
+        QJsonObject val;
+        val[QLatin1String("v")] = state.isValid
+                                  ? QJsonValue(state.scaledValue)
+                                  : QJsonValue(QJsonValue::Null);
+        val[QLatin1String("q")]        = DataCollection::Model::dataQualityToString(q);
+        val[QLatin1String("unit")]     = t.unit.isEmpty()   ? reg.unit   : t.unit;
+        val[QLatin1String("decimals")] = decimals;
+        val[QLatin1String("access")]   = t.access.isEmpty() ? (reg.readOnly ? QLatin1String("r") : QLatin1String("rw")) : t.access;
+
+        values[t.id] = val;
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ts")]     = now.toString(Qt::ISODate);
+    resp[QLatin1String("values")] = values;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hmi/write
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject()) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Invalid JSON body");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+    const QJsonObject body = doc.object();
+
+    if (!body.contains(QLatin1String("tag")) || !body.contains(QLatin1String("v"))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required fields: tag, v");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    const QString tagId = body.value(QLatin1String("tag")).toString().trimmed();
+    QString dbErr;
+    bool found = false;
+    const Model::HmiTag tag = m_db->loadHmiTag(tagId, found, dbErr);
+    if (!found) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("HMI tag not found: %1").arg(tagId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
+    }
+
+    bool regFound = false;
+    const Model::RegisterConfig reg = m_deviceList->findByRegisterId(tag.registerId, regFound);
+    if (!regFound) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("Source register not found: id=%1").arg(tag.registerId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::UnprocessableEntity);
+    }
+
+    // access check
+    const QString effectiveAccess = tag.access.isEmpty()
+                                    ? (reg.readOnly ? QLatin1String("r") : QLatin1String("rw"))
+                                    : tag.access;
+    if (effectiveAccess == QLatin1String("r")) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("HMI tag '%1' is read-only").arg(tagId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::MethodNotAllowed);
+    }
+
+    const QJsonValue vVal = body.value(QLatin1String("v"));
+    Model::WriteRequest req;
+    req.config = reg;
+
+    if (reg.type == Model::RegisterType::Coil) {
+        bool coilVal;
+        if (vVal.isBool()) {
+            coilVal = vVal.toBool();
+        } else {
+            coilVal = (vVal.toDouble() != 0.0);
+        }
+        req.coilValues.append(coilVal);
+        req.rawValues.append(coilVal ? 1 : 0);
+    } else {
+        const double engVal = vVal.toDouble();
+        const double scale  = (reg.scale != 0.0) ? reg.scale : 1.0;
+        const double raw    = engVal / scale;
+        req.rawValues.append(static_cast<quint16>(qBound(0, qRound(raw), 65535)));
+    }
+
+    m_deviceList->enqueueWrite(reg.deviceId, std::move(req));
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]  = true;
+    resp[QLatin1String("tag")] = tagId;
+    return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Accepted);
 }
 
 // ---------------------------------------------------------------------------
