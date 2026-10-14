@@ -1,6 +1,6 @@
 # SmartRoute REST API 명세
 
-> 최종 수정: 2026-10-13 (프로토콜·타입 문자열 정정, byteOrder·unifiedAddress 범위 수정)  
+> 최종 수정: 2026-10-14 (pollMode/effectiveIntervalMs 추가, HMI 태그 API 추가)  
 > Base URL: `http://<device-ip>:8080`  
 > 응답 형식: `application/json` (바이너리 응답 제외)
 
@@ -180,6 +180,7 @@
       "timeoutMs": 1000,
       "intervalMs": 1000,
       "retryCount": 3,
+      "pollMode": "auto",
       "byteOrder": "big"
     }
   ]
@@ -188,7 +189,8 @@
 
 > `connType`: `"serial"` | `"tcp"`  
 > `protocol`: `"modbus_rtu"` | `"modbus_tcp"` | `"modbus_ascii"` | `"pclink"` | `"pclink_sum"`  
-> `byteOrder`: `"big"` | `"little"` | `"default"`
+> `byteOrder`: `"big"` | `"little"` | `"default"`  
+> `pollMode`: `"auto"` | `"manual"` (기본값 `"auto"`)
 
 ---
 
@@ -203,9 +205,11 @@
       "deviceId": 1,
       "deviceCode": "DEV01",
       "displayName": "PLC 1번",
+      "pollMode": "auto",
       "state": "ok",
       "lastPollTimestamp": "2026-10-13T12:00:00",
       "lastPollDurationMs": 45,
+      "effectiveIntervalMs": 1200,
       "consecutiveErrors": 0,
       "lastError": ""
     }
@@ -232,16 +236,18 @@
   "timeoutMs": 1000,
   "intervalMs": 1000,
   "retryCount": 3,
+  "pollMode": "auto",
   "byteOrder": "big"
 }
 ```
 
 > 필수: `name`, `byteOrder`(`"big"` 또는 `"little"` 필수, `"default"` 불가)  
-> `protocol` 생략 시: `connType=serial` → `modbus_rtu`, `connType=tcp` → `modbus_tcp`
+> `protocol` 생략 시: `connType=serial` → `modbus_rtu`, `connType=tcp` → `modbus_tcp`  
+> `pollMode` 생략 시 `"auto"`. `"manual"` 선택 시 `intervalMs` 사용.
 
 **Response 201**
 ```json
-{ "name": "PLC-1" }
+{ "name": "PLC-1", "pollMode": "auto" }
 ```
 
 ---
@@ -254,11 +260,20 @@
 {
   "name": "PLC-1-updated",
   "slaveId": 2,
+  "pollMode": "manual",
   "intervalMs": 2000
 }
 ```
 
-**Response 200** (body 없음)  
+**Response 200**
+```json
+{ "ok": true, "pollMode": "manual" }
+```
+`pollMode:"manual"` 설정 시 비현실적인 `intervalMs`(실측 소요시간보다 짧음)를 넣으면 저장은 허용하되 `"warning"` 필드 포함:
+```json
+{ "ok": true, "pollMode": "manual", "warning": "설정 주기(500ms)가 실측 소요시간(800ms)보다 짧습니다" }
+```
+
 **에러** 404: 장비 없음
 
 ---
