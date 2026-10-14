@@ -111,13 +111,18 @@ void SerialWorker::run()
                 const Processor::DataCollector::FieldResult &r = results.at(fi);
                 const Model::RegisterConfig &config = m_devices[i].registers.at(fi);
 
+                const int intervalForQuality =
+                    (isAuto && effectiveInterval > 0)
+                    ? effectiveInterval
+                    : m_devices[i].polling.intervalMs;
+
                 m_registerTable->updateState(
                     config,
                     r.registerValues,
                     r.coilValues,
                     r.ok,
                     r.error,
-                    m_devices[i].polling.intervalMs);
+                    intervalForQuality);
 
                 if (!r.ok) {
                     allOk     = false;

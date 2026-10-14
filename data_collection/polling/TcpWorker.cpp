@@ -40,6 +40,10 @@ void TcpWorker::run()
 
     while (m_running) {
         const qint64 pollStart = QDateTime::currentMSecsSinceEpoch();
+        const int effectiveInterval = (prevPollStart > 0)
+                                      ? static_cast<int>(pollStart - prevPollStart) : 0;
+        prevPollStart = pollStart;
+
         bool    allOk     = true;
         QString lastError;
 
@@ -51,13 +55,19 @@ void TcpWorker::run()
             const Processor::DataCollector::FieldResult &r     = results.at(fi);
             const Model::RegisterConfig                 &config = m_device.registers.at(fi);
 
+            const bool isAuto = (m_device.polling.pollMode == Model::PollingConfig::PollMode::Auto);
+            const int intervalForQuality =
+                (isAuto && effectiveInterval > 0)
+                ? effectiveInterval
+                : m_device.polling.intervalMs;
+
             m_registerTable->updateState(
                 config,
                 r.registerValues,
                 r.coilValues,
                 r.ok,
                 r.error,
-                m_device.polling.intervalMs);
+                intervalForQuality);
 
             if (!r.ok) {
                 allOk     = false;
@@ -66,9 +76,6 @@ void TcpWorker::run()
         }
 
         const int durationMs = static_cast<int>(QDateTime::currentMSecsSinceEpoch() - pollStart);
-        const int effectiveInterval = (prevPollStart > 0)
-                                      ? static_cast<int>(pollStart - prevPollStart) : 0;
-        prevPollStart = pollStart;
 
         Model::DeviceInfo::Status status;
         status.lastPollTimestamp    = pollStart;
