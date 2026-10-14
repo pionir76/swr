@@ -692,6 +692,7 @@ QHttpServerResponse ApiServer::handleGetDevices(const QHttpServerRequest &reques
         obj["timeoutMs"]   = d.connection.timeoutMs;
         obj["intervalMs"]  = d.polling.intervalMs;
         obj["retryCount"]  = d.polling.retryCount;
+        obj["pollMode"]    = Model::pollModeToString(d.polling.pollMode);
         obj["byteOrder"]   = Model::byteOrderToString(d.connection.defaultByteOrder);
         arr.append(obj);
     }
@@ -718,14 +719,16 @@ QHttpServerResponse ApiServer::handleGetDeviceStatus(const QHttpServerRequest &r
         }
 
         QJsonObject obj;
-        obj["deviceId"]           = d.id;
-        obj["deviceCode"]         = d.deviceCode;
-        obj["displayName"]        = d.displayName;
-        obj["state"]              = stateStr;
-        obj["lastPollTimestamp"]  = d.status.lastPollTimestamp;
-        obj["lastPollDurationMs"] = d.status.lastPollDurationMs;
-        obj["consecutiveErrors"]  = d.status.consecutiveErrors;
-        obj["lastError"]          = d.status.lastError;
+        obj["deviceId"]             = d.id;
+        obj["deviceCode"]           = d.deviceCode;
+        obj["displayName"]          = d.displayName;
+        obj["pollMode"]             = Model::pollModeToString(d.polling.pollMode);
+        obj["state"]                = stateStr;
+        obj["lastPollTimestamp"]    = d.status.lastPollTimestamp;
+        obj["lastPollDurationMs"]   = d.status.lastPollDurationMs;
+        obj["effectiveIntervalMs"]  = d.status.effectiveIntervalMs;
+        obj["consecutiveErrors"]    = d.status.consecutiveErrors;
+        obj["lastError"]            = d.status.lastError;
         arr.append(obj);
     }
 
@@ -801,6 +804,8 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
 
     device.polling.intervalMs = body.value("intervalMs").toInt(device.polling.intervalMs);
     device.polling.retryCount = body.value("retryCount").toInt(device.polling.retryCount);
+    device.polling.pollMode   = Model::pollModeFromString(
+        body.value("pollMode").toString(QStringLiteral("auto")));
 
     QString error;
     if (!syncAddDevice(device, error)) {
@@ -812,7 +817,8 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
 
     Util::Logger::info(QStringLiteral("Device added: %1").arg(device.name));
     QJsonObject resp;
-    resp["name"] = device.name;
+    resp["name"]     = device.name;
+    resp["pollMode"] = Model::pollModeToString(device.polling.pollMode);
     return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Created);
 }
 
@@ -853,6 +859,7 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     if (body.contains("timeoutMs"))   device.connection.timeoutMs = body.value("timeoutMs").toInt();
     if (body.contains("intervalMs"))  device.polling.intervalMs   = body.value("intervalMs").toInt();
     if (body.contains("retryCount"))  device.polling.retryCount   = body.value("retryCount").toInt();
+    if (body.contains("pollMode"))    device.polling.pollMode     = Model::pollModeFromString(body.value("pollMode").toString());
 
     if (body.contains("byteOrder")) {
         const QString byteOrderStr = body.value("byteOrder").toString().toLower();
@@ -891,7 +898,16 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     }
 
     Util::Logger::info(QStringLiteral("Device updated: id=%1").arg(deviceId));
-    return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
+    QJsonObject resp;
+    resp["ok"]       = true;
+    resp["pollMode"] = Model::pollModeToString(device.polling.pollMode);
+    if (device.polling.pollMode == Model::PollingConfig::PollMode::Manual
+        && device.status.lastPollDurationMs > 0
+        && device.polling.intervalMs < static_cast<int>(device.status.lastPollDurationMs * 1.2)) {
+        resp["warning"] = QStringLiteral("설정 주기(%1ms)가 실측 소요시간(%2ms)보다 짧습니다")
+                          .arg(device.polling.intervalMs).arg(device.status.lastPollDurationMs);
+    }
+    return QHttpServerResponse(resp);
 }
 
 QHttpServerResponse ApiServer::handleDeleteDevice(const QHttpServerRequest &request, const QString &id)

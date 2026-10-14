@@ -44,11 +44,13 @@ void SerialWorker::run()
 
     std::vector<std::unique_ptr<Processor::DataCollector>> collectors;
     QVector<qint64> lastPollMs;
+    QVector<qint64> prevPollMs;
     QVector<int>    consecutiveErrors;
     QVector<Model::DeviceInfo::Status::State> prevStates;
 
     collectors.reserve(m_devices.size());
     lastPollMs.reserve(m_devices.size());
+    prevPollMs.reserve(m_devices.size());
     consecutiveErrors.reserve(m_devices.size());
     prevStates.reserve(m_devices.size());
 
@@ -57,12 +59,13 @@ void SerialWorker::run()
 
         collectors.push_back(
             std::make_unique<Processor::DataCollector>(
-                device, 
-                m_deviceList, 
+                device,
+                m_deviceList,
                 std::move(client))
         );
 
         lastPollMs.append(0);
+        prevPollMs.append(0);
         consecutiveErrors.append(0);
         prevStates.append(Model::DeviceInfo::Status::State::Unknown);
     }
@@ -76,12 +79,17 @@ void SerialWorker::run()
 
             collectors[i]->flushWrites();
 
-            if (now - lastPollMs[i] < m_devices[i].polling.intervalMs) continue;
             if (m_devices[i].registers.isEmpty()) continue;
+
+            const bool isAuto = (m_devices[i].polling.pollMode == Model::PollingConfig::PollMode::Auto);
+            if (!isAuto && (now - lastPollMs[i] < m_devices[i].polling.intervalMs)) continue;
 
             anyPolled = true;
 
             const qint64 pollStart = QDateTime::currentMSecsSinceEpoch();
+            const int effectiveInterval = (prevPollMs[i] > 0)
+                                          ? static_cast<int>(pollStart - prevPollMs[i]) : 0;
+            prevPollMs[i] = pollStart;
             lastPollMs[i] = pollStart;
 
             bool allOk = true;
@@ -120,8 +128,9 @@ void SerialWorker::run()
             }
 
             Model::DeviceInfo::Status status;
-            status.lastPollTimestamp  = pollStart;
-            status.lastPollDurationMs = static_cast<int>(QDateTime::currentMSecsSinceEpoch() - pollStart);
+            status.lastPollTimestamp    = pollStart;
+            status.lastPollDurationMs   = static_cast<int>(QDateTime::currentMSecsSinceEpoch() - pollStart);
+            status.effectiveIntervalMs  = effectiveInterval;
 
             if (allOk) {
                 consecutiveErrors[i] = 0;

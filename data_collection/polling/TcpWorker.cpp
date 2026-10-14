@@ -31,7 +31,8 @@ void TcpWorker::run()
 
     auto client = Comm::createDeviceClient(m_device.connection);
     Processor::DataCollector collector(m_device, m_deviceList, std::move(client));
-    int consecutiveErrors = 0;
+    int    consecutiveErrors = 0;
+    qint64 prevPollStart     = 0;
     Model::DeviceInfo::Status::State prevState = Model::DeviceInfo::Status::State::Unknown;
 
     if (m_device.registers.isEmpty())
@@ -64,9 +65,15 @@ void TcpWorker::run()
             }
         }
 
+        const int durationMs = static_cast<int>(QDateTime::currentMSecsSinceEpoch() - pollStart);
+        const int effectiveInterval = (prevPollStart > 0)
+                                      ? static_cast<int>(pollStart - prevPollStart) : 0;
+        prevPollStart = pollStart;
+
         Model::DeviceInfo::Status status;
-        status.lastPollTimestamp  = pollStart;
-        status.lastPollDurationMs = static_cast<int>(QDateTime::currentMSecsSinceEpoch() - pollStart);
+        status.lastPollTimestamp    = pollStart;
+        status.lastPollDurationMs   = durationMs;
+        status.effectiveIntervalMs  = effectiveInterval;
 
         if (allOk) {
             consecutiveErrors = 0;
@@ -96,7 +103,12 @@ void TcpWorker::run()
         }
 
         collector.flushWrites();
-        msleep(m_device.polling.intervalMs);
+
+        const bool isAuto = (m_device.polling.pollMode == Model::PollingConfig::PollMode::Auto);
+        const int sleepMs = isAuto
+                            ? qMax(static_cast<int>(durationMs * 1.3), 500)
+                            : m_device.polling.intervalMs;
+        msleep(sleepMs);
     }
 }
 

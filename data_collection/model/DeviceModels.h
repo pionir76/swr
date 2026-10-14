@@ -54,9 +54,22 @@ struct RegisterConfig {
 };
 
 struct PollingConfig {
-    int intervalMs = 1000;
-    int retryCount = 3;
+    enum class PollMode { Auto, Manual };
+    PollMode pollMode  = PollMode::Auto;
+    int      intervalMs = 1000;
+    int      retryCount = 3;
 };
+
+inline PollingConfig::PollMode pollModeFromString(const QString &s) {
+    return s.toLower() == QLatin1String("manual")
+           ? PollingConfig::PollMode::Manual
+           : PollingConfig::PollMode::Auto;
+}
+inline QString pollModeToString(PollingConfig::PollMode m) {
+    return m == PollingConfig::PollMode::Manual
+           ? QStringLiteral("manual")
+           : QStringLiteral("auto");
+}
 
 struct DeviceConnection {
     // Connection Type
@@ -107,9 +120,10 @@ struct DeviceInfo {
             Error
         } state = State::Unknown;
 
-        qint64  lastPollTimestamp  = 0;
-        int     lastPollDurationMs = 0;
-        int     consecutiveErrors  = 0;
+        qint64  lastPollTimestamp    = 0;
+        int     lastPollDurationMs  = 0;
+        int     effectiveIntervalMs = 0;  // measured interval between poll starts
+        int     consecutiveErrors   = 0;
         QString lastError;
     } status;
 };

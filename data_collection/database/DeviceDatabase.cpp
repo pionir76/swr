@@ -331,6 +331,19 @@ bool DeviceDatabase::initSchema(QString& error)
     }
 
     //-----------------------------------------------------------//
+    // Schema migrations — ADD COLUMN to existing tables
+    // SQLite does not support IF NOT EXISTS in ALTER TABLE;
+    // ignore "duplicate column" error (error code 1) silently.
+    //-----------------------------------------------------------//
+    {
+        QSqlQuery mq(db);
+        mq.exec(QStringLiteral(
+            "ALTER TABLE devices ADD COLUMN poll_mode TEXT NOT NULL DEFAULT 'auto' "
+            "CHECK(poll_mode IN ('auto', 'manual'))"));
+        // ignore error — column may already exist
+    }
+
+    //-----------------------------------------------------------//
     // ensure default admin account exists
     // set password to "1234" if not exists and id is 0
     //-----------------------------------------------------------//
@@ -379,7 +392,7 @@ QList<Model::DeviceInfo> DeviceDatabase::loadDevices(QString &error) const
 
     if (!q.exec(QStringLiteral(
             "SELECT id, device_code, name, display_name, conn_type, ip_address, tcp_port, slave_id, timeout_ms, "
-            "interval_ms, retry_count, byte_order, protocol "
+            "interval_ms, retry_count, byte_order, protocol, poll_mode "
             "FROM devices "
             "ORDER BY name"))) {
         error = q.lastError().text();
@@ -404,9 +417,9 @@ QList<Model::DeviceInfo> DeviceDatabase::loadDevices(QString &error) const
 
         polling.intervalMs      = q.value(9).toInt();
         polling.retryCount      = q.value(10).toInt();
-
         conn.defaultByteOrder   = Model::byteOrderFromString(q.value(11).toString().toLower());
         conn.protocol           = Model::protocolFromString(q.value(12).toString().toLower());
+        polling.pollMode        = Model::pollModeFromString(q.value(13).toString());
 
         QString regError;
         device.registers = loadRegisters(device.id, regError);
@@ -436,10 +449,10 @@ bool DeviceDatabase::insertDevice(const Model::DeviceInfo &device, QString &erro
     q.prepare(QStringLiteral(
         "INSERT INTO devices ("
         "device_code, name, display_name, conn_type, ip_address, tcp_port, "
-        "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol"
+        "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode"
         ") VALUES ("
         ":device_code, :name, :display_name, :conn_type, :ip_address, :tcp_port, "
-        ":slave_id, :timeout_ms, :interval_ms, :retry_count, :byte_order, :protocol"
+        ":slave_id, :timeout_ms, :interval_ms, :retry_count, :byte_order, :protocol, :poll_mode"
         ")"
         ));
 
@@ -455,6 +468,7 @@ bool DeviceDatabase::insertDevice(const Model::DeviceInfo &device, QString &erro
     q.bindValue(":retry_count",  device.polling.retryCount);
     q.bindValue(":byte_order",   Model::byteOrderToString(device.connection.defaultByteOrder));
     q.bindValue(":protocol",     Model::protocolToString(device.connection.protocol));
+    q.bindValue(":poll_mode",    Model::pollModeToString(device.polling.pollMode));
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -487,7 +501,8 @@ bool DeviceDatabase::updateDevice(const Model::DeviceInfo &device, QString &erro
         "interval_ms=:interval_ms, "
         "retry_count=:retry_count, "
         "byte_order=:byte_order, "
-        "protocol=:protocol "
+        "protocol=:protocol, "
+        "poll_mode=:poll_mode "
         "WHERE id=:id"
         ));
 
@@ -504,6 +519,7 @@ bool DeviceDatabase::updateDevice(const Model::DeviceInfo &device, QString &erro
     q.bindValue(":retry_count",  device.polling.retryCount);
     q.bindValue(":byte_order",   Model::byteOrderToString(device.connection.defaultByteOrder));
     q.bindValue(":protocol",     Model::protocolToString(device.connection.protocol));
+    q.bindValue(":poll_mode",    Model::pollModeToString(device.polling.pollMode));
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -1177,8 +1193,8 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.prepare(QStringLiteral(
                 "INSERT INTO devices "
                 "(device_code, name, display_name, conn_type, ip_address, tcp_port, "
-                "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+                "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
 
             q.addBindValue(obj[QLatin1String("deviceCode")].toString());
             q.addBindValue(obj[QLatin1String("name")].toString());
@@ -1192,6 +1208,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.addBindValue(poll[QLatin1String("retryCount")].toInt(3));
             q.addBindValue(conn[QLatin1String("defaultByteOrder")].toString(QStringLiteral("big")));
             q.addBindValue(conn[QLatin1String("protocol")].toString());
+            q.addBindValue(poll[QLatin1String("pollMode")].toString(QStringLiteral("auto")));
 
             if (!q.exec()) {
                 error = q.lastError().text();
