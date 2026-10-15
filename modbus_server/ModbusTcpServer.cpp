@@ -214,14 +214,14 @@ bool ModbusTcpServer::forwardWrite(const QModbusDataUnit &unit)
     configs.reserve(count);
 
     //-----------------------------------------------------------//
-    // Reject the whole request if any target is read-only, so a
-    // multi-register write is never applied partially.
-    // Unmapped addresses are ignored, as before.
+    // Reject the whole request if any target is read-only or belongs
+    // to a disabled device, so a multi-register write is never applied
+    // partially. Unmapped addresses are ignored, as before.
     //-----------------------------------------------------------//
     for (int i = 0; i < count; ++i) {
         bool found = false;
         const auto config = m_deviceList->findByUnifiedAddress(unit.startAddress() + i, found);
-        if (found && config.readOnly)
+        if (found && (config.readOnly || !m_deviceList->isEnabled(config.deviceId)))
             return false;
         configs.append(found ? config : DataCollection::Model::RegisterConfig{});
     }

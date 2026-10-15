@@ -202,6 +202,7 @@ QByteArray BackupManager::buildDevices(const DataCollection::Database::DeviceDat
         obj[QLatin1String("deviceCode")]  = d.deviceCode;
         obj[QLatin1String("name")]        = d.name;
         obj[QLatin1String("displayName")] = d.displayName;
+        obj[QLatin1String("enabled")]     = d.enabled;
         obj[QLatin1String("connection")]  = conn;
         obj[QLatin1String("polling")]     = polling;
 

@@ -15,6 +15,12 @@ class RegisterTable {
 
 public:
     void clear();
+
+    // Called when polling starts. Every register gets an entry, so lists built
+    // from this table are always complete. Enabled devices start empty; disabled
+    // devices keep their last value since they will not be polled.
+    void prepareForPolling(const QList<Model::DeviceInfo> &devices);
+
     void updateState(const Model::RegisterConfig &config,
                      const QVector<quint16> &registerValues,
                      const QVector<bool> &coilValues,

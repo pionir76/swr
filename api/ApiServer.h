@@ -62,6 +62,7 @@ private:
     QHttpServerResponse handleGetDeviceStatus(const QHttpServerRequest &request);
     QHttpServerResponse handlePostDevice(const QHttpServerRequest &request);
     QHttpServerResponse handlePutDevice(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handlePutDevicesEnabled(const QHttpServerRequest &request);
     QHttpServerResponse handleDeleteDevice(const QHttpServerRequest &request, const QString &id);
 
     // Register

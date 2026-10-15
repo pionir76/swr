@@ -377,6 +377,10 @@ bool DeviceDatabase::initSchema(QString& error)
             "ALTER TABLE devices ADD COLUMN poll_mode TEXT NOT NULL DEFAULT 'auto' "
             "CHECK(poll_mode IN ('auto', 'manual'))"));
         // ignore error — column may already exist
+
+        mq.exec(QStringLiteral(
+            "ALTER TABLE devices ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"));
+        // ignore error — column may already exist
     }
 
     //-----------------------------------------------------------//
@@ -428,7 +432,7 @@ QList<Model::DeviceInfo> DeviceDatabase::loadDevices(QString &error) const
 
     if (!q.exec(QStringLiteral(
             "SELECT id, device_code, name, display_name, conn_type, ip_address, tcp_port, slave_id, timeout_ms, "
-            "interval_ms, retry_count, byte_order, protocol, poll_mode "
+            "interval_ms, retry_count, byte_order, protocol, poll_mode, enabled "
             "FROM devices "
             "ORDER BY name"))) {
         error = q.lastError().text();
@@ -456,6 +460,7 @@ QList<Model::DeviceInfo> DeviceDatabase::loadDevices(QString &error) const
         conn.defaultByteOrder   = Model::byteOrderFromString(q.value(11).toString().toLower());
         conn.protocol           = Model::protocolFromString(q.value(12).toString().toLower());
         polling.pollMode        = Model::pollModeFromString(q.value(13).toString());
+        device.enabled          = q.value(14).toInt() != 0;
 
         QString regError;
         device.registers = loadRegisters(device.id, regError);
@@ -485,10 +490,10 @@ bool DeviceDatabase::insertDevice(const Model::DeviceInfo &device, QString &erro
     q.prepare(QStringLiteral(
         "INSERT INTO devices ("
         "device_code, name, display_name, conn_type, ip_address, tcp_port, "
-        "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode"
+        "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode, enabled"
         ") VALUES ("
         ":device_code, :name, :display_name, :conn_type, :ip_address, :tcp_port, "
-        ":slave_id, :timeout_ms, :interval_ms, :retry_count, :byte_order, :protocol, :poll_mode"
+        ":slave_id, :timeout_ms, :interval_ms, :retry_count, :byte_order, :protocol, :poll_mode, :enabled"
         ")"
         ));
 
@@ -505,6 +510,7 @@ bool DeviceDatabase::insertDevice(const Model::DeviceInfo &device, QString &erro
     q.bindValue(":byte_order",   Model::byteOrderToString(device.connection.defaultByteOrder));
     q.bindValue(":protocol",     Model::protocolToString(device.connection.protocol));
     q.bindValue(":poll_mode",    Model::pollModeToString(device.polling.pollMode));
+    q.bindValue(":enabled",      device.enabled ? 1 : 0);
 
     if (!q.exec()) {
         error = q.lastError().text();
@@ -538,7 +544,8 @@ bool DeviceDatabase::updateDevice(const Model::DeviceInfo &device, QString &erro
         "retry_count=:retry_count, "
         "byte_order=:byte_order, "
         "protocol=:protocol, "
-        "poll_mode=:poll_mode "
+        "poll_mode=:poll_mode, "
+        "enabled=:enabled "
         "WHERE id=:id"
         ));
 
@@ -556,12 +563,51 @@ bool DeviceDatabase::updateDevice(const Model::DeviceInfo &device, QString &erro
     q.bindValue(":byte_order",   Model::byteOrderToString(device.connection.defaultByteOrder));
     q.bindValue(":protocol",     Model::protocolToString(device.connection.protocol));
     q.bindValue(":poll_mode",    Model::pollModeToString(device.polling.pollMode));
+    q.bindValue(":enabled",      device.enabled ? 1 : 0);
 
     if (!q.exec()) {
         error = q.lastError().text();
         return false;
     }
 
+    return true;
+}
+
+bool DeviceDatabase::setDevicesEnabled(const QList<QPair<int, bool>> &changes, QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return false;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery q(db);
+    for (const auto &c : changes) {
+        q.prepare(QStringLiteral("UPDATE devices SET enabled=? WHERE id=?"));
+        q.addBindValue(c.second ? 1 : 0);
+        q.addBindValue(c.first);
+        if (!q.exec()) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
+        if (q.numRowsAffected() == 0) {
+            error = QStringLiteral("Device not found: %1").arg(c.first);
+            db.rollback();
+            return false;
+        }
+    }
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        db.rollback();
+        return false;
+    }
     return true;
 }
 
@@ -1272,8 +1318,8 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.prepare(QStringLiteral(
                 "INSERT INTO devices "
                 "(device_code, name, display_name, conn_type, ip_address, tcp_port, "
-                "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+                "slave_id, timeout_ms, interval_ms, retry_count, byte_order, protocol, poll_mode, enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
 
             q.addBindValue(obj[QLatin1String("deviceCode")].toString());
             q.addBindValue(obj[QLatin1String("name")].toString());
@@ -1288,6 +1334,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.addBindValue(conn[QLatin1String("defaultByteOrder")].toString(QStringLiteral("big")));
             q.addBindValue(conn[QLatin1String("protocol")].toString());
             q.addBindValue(poll[QLatin1String("pollMode")].toString(QStringLiteral("auto")));
+            q.addBindValue(obj[QLatin1String("enabled")].toBool(true) ? 1 : 0);
 
             if (!q.exec()) {
                 error = q.lastError().text();

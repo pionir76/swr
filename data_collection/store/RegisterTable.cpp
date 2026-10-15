@@ -16,6 +16,36 @@ void RegisterTable::clear()
     m_states.clear();
 }
 
+void RegisterTable::prepareForPolling(const QList<Model::DeviceInfo> &devices)
+{
+    QMutexLocker locker(&m_mutex);
+
+    QHash<int, Model::RegisterState> next;
+    for (const Model::DeviceInfo &d : devices) {
+        for (const Model::RegisterConfig &config : d.registers) {
+            if (config.unifiedAddress < 0)
+                continue;
+
+            Model::RegisterState entry;
+            if (!d.enabled)
+                entry = m_states.value(config.unifiedAddress);
+
+            if (!d.enabled && entry.lastUpdated.isValid()) {
+                // keep the last received value even if the final poll failed
+                entry.config       = config;
+                entry.isValid      = true;
+                entry.errorMessage.clear();
+            } else {
+                entry = Model::RegisterState{};
+                entry.config  = config;
+                entry.isValid = false;
+            }
+            next.insert(config.unifiedAddress, entry);
+        }
+    }
+    m_states = std::move(next);
+}
+
 //---------------------------------------------------------------------//
 // if m_states already contains an entry for this unifiedId, update it; 
 // otherwise, create a new entry

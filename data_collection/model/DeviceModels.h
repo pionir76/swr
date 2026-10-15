@@ -112,6 +112,7 @@ struct DeviceInfo {
     DeviceConnection connection;
     QList<RegisterConfig> registers;
     PollingConfig polling;
+    bool enabled = true;   // disabled devices are excluded when polling starts
 
     // Runtime status, Updated By Polling Worker.
     struct Status {
