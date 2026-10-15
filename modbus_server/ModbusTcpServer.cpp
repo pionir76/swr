@@ -25,6 +25,7 @@ public:
         : QModbusTcpServer(parent) {}
 
     std::function<quint16(int)> readFn;  // addr(=unifiedAddress) → raw quint16
+    std::function<bool(const QModbusDataUnit &)> writeFn;
 
     bool readData(QModbusDataUnit *unit) const override
     {
@@ -32,6 +33,17 @@ public:
         for (int i = 0; i < static_cast<int>(unit->valueCount()); ++i)
             unit->setValue(i, readFn(unit->startAddress() + i));
         return true;
+    }
+
+    //-----------------------------------------------------------//
+    // Writes are forwarded from here, not from dataWritten: data() goes
+    // through readData() and returns the live device value instead of the
+    // written one, and Qt suppresses dataWritten when the value is unchanged.
+    // Returning false makes Qt answer with exception 0x04.
+    //-----------------------------------------------------------//
+    bool writeData(const QModbusDataUnit &unit) override
+    {
+        return writeFn ? writeFn(unit) : false;
     }
 
     bool acceptNewConnection(QTcpSocket *newClient) override
@@ -127,8 +139,7 @@ bool ModbusTcpServer::start(quint16 port, int slaveId, QString &error)
     server->setConnectionParameter(QModbusDevice::NetworkPortParameter,    port);
     server->setConnectionParameter(QModbusDevice::NetworkAddressParameter, QStringLiteral("0.0.0.0"));
 
-    connect(server, &QModbusServer::dataWritten,
-            this,   &ModbusTcpServer::onDataWritten);
+    server->writeFn = [this](const QModbusDataUnit &unit) { return forwardWrite(unit); };
 
     connect(server, &QModbusDevice::errorOccurred,
             this, [this, server](QModbusDevice::Error) {
@@ -195,30 +206,39 @@ QStringList ModbusTcpServer::connectedClients() const
     return static_cast<ModbusServerImpl *>(m_server)->connectedIps();
 }
 
-void ModbusTcpServer::onDataWritten(QModbusDataUnit::RegisterType table, int address, int size)
+bool ModbusTcpServer::forwardWrite(const QModbusDataUnit &unit)
 {
-    Q_UNUSED(table)
+    const int count = static_cast<int>(unit.valueCount());
+
+    QList<DataCollection::Model::RegisterConfig> configs;
+    configs.reserve(count);
 
     //-----------------------------------------------------------//
-    // readOnly already blocked by setData() override where readOnly is 
-    // already blocked, so only propagation is performed
+    // Reject the whole request if any target is read-only, so a
+    // multi-register write is never applied partially.
+    // Unmapped addresses are ignored, as before.
     //-----------------------------------------------------------//
-    QModbusDataUnit unit(QModbusDataUnit::HoldingRegisters, address, static_cast<quint16>(size));
-    if (!m_server->data(&unit)) return;
-
-    for (int i = 0; i < size; ++i) {
-        const int unifiedId = address + i;
+    for (int i = 0; i < count; ++i) {
         bool found = false;
-        const auto config = m_deviceList->findByUnifiedAddress(unifiedId, found);
-        if (!found || config.readOnly) continue;
+        const auto config = m_deviceList->findByUnifiedAddress(unit.startAddress() + i, found);
+        if (found && config.readOnly)
+            return false;
+        configs.append(found ? config : DataCollection::Model::RegisterConfig{});
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const auto &config = configs.at(i);
+        if (config.unifiedAddress < 0)
+            continue;
 
         DataCollection::Model::WriteRequest req;
         req.config    = config;
         req.rawValues = { unit.value(i) };
 
         m_deviceList->enqueueWrite(config.deviceId, req);
-        emit writeRequested(unifiedId, static_cast<double>(unit.value(i)));
+        emit writeRequested(config.unifiedAddress, static_cast<double>(unit.value(i)));
     }
+    return true;
 }
 
 } // namespace ModbusServer

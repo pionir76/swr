@@ -39,10 +39,9 @@ signals:
     void clientConnected(const QString &ip);
     void clientDisconnected(const QString &ip);
 
-private slots:
-    void onDataWritten(QModbusDataUnit::RegisterType table, int address, int size);
-
 private:
+    bool forwardWrite(const QModbusDataUnit &unit);
+
     std::shared_ptr<DataCollection::Store::RegisterTable> m_registerTable;
     std::shared_ptr<DataCollection::Store::DeviceList>    m_deviceList;
 
