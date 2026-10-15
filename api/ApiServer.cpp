@@ -231,6 +231,20 @@ void ApiServer::setupRoutes()
     m_server.route("/api/hmi/write", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostHmiWrite(req); });
 
+    // HMI Project / Screens
+    m_server.route("/api/hmi/project", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetHmiProject(req); });
+    m_server.route("/api/hmi/project", QHttpServerRequest::Method::Put,
+                   [this](const QHttpServerRequest &req) { return handlePutHmiProject(req); });
+    m_server.route("/api/hmi/screens", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostHmiScreen(req); });
+    m_server.route("/api/hmi/screens/<arg>", QHttpServerRequest::Method::Get,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handleGetHmiScreen(req, id); });
+    m_server.route("/api/hmi/screens/<arg>", QHttpServerRequest::Method::Put,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handlePutHmiScreen(req, id); });
+    m_server.route("/api/hmi/screens/<arg>", QHttpServerRequest::Method::Delete,
+                   [this](const QString &id, const QHttpServerRequest &req) { return handleDeleteHmiScreen(req, id); });
+
     m_server.route("/api/trend/config", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetTrendConfig(req); });
     m_server.route("/api/trend/config", QHttpServerRequest::Method::Put,
@@ -2542,7 +2556,7 @@ QHttpServerResponse ApiServer::handleRestoreApply(const QHttpServerRequest &requ
     options.devices   = optJson[QLatin1String("devices")].toBool(true);
     options.registers = optJson[QLatin1String("registers")].toBool(true);
     options.users     = optJson[QLatin1String("users")].toBool(true);
-    options.hmi       = optJson[QLatin1String("hmi")].toBool(false);
+    options.hmi       = optJson[QLatin1String("hmi")].toBool(true);
 
     bool restartRequired = false;
     QString applyError;
@@ -3232,6 +3246,381 @@ QHttpServerResponse ApiServer::handlePutSystemLanguage(const QHttpServerRequest 
     QJsonObject resp;
     resp[QLatin1String("ok")]       = true;
     resp[QLatin1String("language")] = lang;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// HMI Project / Screens
+// ---------------------------------------------------------------------------
+static constexpr int kHmiContentMaxBytes = 256 * 1024;
+static constexpr int kHmiTitleMaxLen     = 64;
+
+static bool hmiIdValid(const QString &id)
+{
+    static const QRegularExpression kPattern(QStringLiteral("^[A-Za-z0-9_-]{1,64}$"));
+    return kPattern.match(id).hasMatch();
+}
+
+//-----------------------------------------------------------//
+// Validates screen content and returns it as compact JSON.
+// Qt's JSON writer round-trips doubles exactly and preserves array order
+// (widget draw order); object key order is not preserved and is not relied on.
+//-----------------------------------------------------------//
+static bool validateHmiContent(const QJsonValue &value,
+                               QString &compact,
+                               bool &tooLarge,
+                               QString &error)
+{
+    tooLarge = false;
+
+    if (!value.isObject()) {
+        error = QStringLiteral("'content' must be a JSON object");
+        return false;
+    }
+
+    const QJsonObject obj = value.toObject();
+    if (obj.value(QLatin1String("format")).toString() != QLatin1String("whmi.screen")) {
+        error = QStringLiteral("'content.format' must be \"whmi.screen\"");
+        return false;
+    }
+
+    const QByteArray bytes = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+    if (bytes.size() > kHmiContentMaxBytes) {
+        tooLarge = true;
+        error    = QStringLiteral("'content' is %1 bytes, limit is %2")
+                       .arg(bytes.size()).arg(kHmiContentMaxBytes);
+        return false;
+    }
+
+    compact = QString::fromUtf8(bytes);
+    return true;
+}
+
+static QJsonValue hmiStartScreenValue(const QString &startScreen)
+{
+    return startScreen.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(startScreen);
+}
+
+static QHttpServerResponse hmiError(const QString &message,
+                                    QHttpServerResponse::StatusCode code)
+{
+    QJsonObject e;
+    e[QLatin1String("error")] = message;
+    return QHttpServerResponse(e, code);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/project
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiProject(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    Model::HmiProject project;
+    QList<Model::HmiScreen> screens;
+    QString dbErr;
+
+    if (!m_db->loadHmiProject(project, screens, dbErr))
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+
+    QJsonArray arr;
+    for (const Model::HmiScreen &s : screens) {
+        QJsonObject obj;
+        obj[QLatin1String("id")]        = s.id;
+        obj[QLatin1String("title")]     = s.title;
+        obj[QLatin1String("revision")]  = s.revision;
+        obj[QLatin1String("updatedAt")] = s.updatedAt;
+        obj[QLatin1String("updatedBy")] = s.updatedBy;
+        arr.append(obj);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("name")]        = project.name;
+    resp[QLatin1String("startScreen")] = hmiStartScreenValue(project.startScreen);
+    resp[QLatin1String("screens")]     = arr;
+    resp[QLatin1String("revision")]    = project.revision;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/hmi/project
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePutHmiProject(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+
+    if (!body.value(QLatin1String("revision")).isDouble())
+        return hmiError(QStringLiteral("'revision' is required"),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    Model::HmiProjectUpdate update;
+    update.revision = body.value(QLatin1String("revision")).toInt();
+
+    if (body.contains(QLatin1String("name"))) {
+        update.hasName = true;
+        update.name    = body.value(QLatin1String("name")).toString();
+    }
+
+    if (body.contains(QLatin1String("startScreen"))) {
+        const QJsonValue v = body.value(QLatin1String("startScreen"));
+        update.hasStartScreen = true;
+        update.startScreen    = v.isNull() ? QString() : v.toString();
+    }
+
+    if (body.contains(QLatin1String("order"))) {
+        const QJsonValue v = body.value(QLatin1String("order"));
+        if (!v.isArray())
+            return hmiError(QStringLiteral("'order' must be an array of screen ids"),
+                            QHttpServerResponse::StatusCode::BadRequest);
+
+        update.hasOrder = true;
+        for (const QJsonValue &item : v.toArray())
+            update.order.append(item.toString());
+    }
+
+    Model::HmiProject result;
+    QString dbErr;
+    const Model::HmiOpResult op = m_db->updateHmiProject(update, result, dbErr);
+
+    switch (op) {
+    case Model::HmiOpResult::Ok:
+        break;
+
+    case Model::HmiOpResult::RevisionMismatch: {
+        QJsonObject e;
+        e[QLatin1String("error")]    = QStringLiteral("revision mismatch");
+        e[QLatin1String("revision")] = result.revision;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+    }
+    case Model::HmiOpResult::InvalidStartScreen:
+        return hmiError(QStringLiteral("'startScreen' must reference an existing screen "
+                                       "(null is only allowed while no screen exists)"),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    case Model::HmiOpResult::InvalidOrder:
+        return hmiError(QStringLiteral("'order' must list every screen id exactly once"),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    default:
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]       = true;
+    resp[QLatin1String("revision")] = result.revision;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/screens/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiScreen(const QHttpServerRequest &request,
+                                                  const QString &id)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    QString dbErr;
+    bool found = false;
+    const Model::HmiScreen screen = m_db->loadHmiScreen(id, found, dbErr);
+
+    if (!dbErr.isEmpty())
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+    if (!found)
+        return hmiError(QStringLiteral("Screen not found: %1").arg(id),
+                        QHttpServerResponse::StatusCode::NotFound);
+
+    QJsonObject resp;
+    resp[QLatin1String("id")]        = screen.id;
+    resp[QLatin1String("title")]     = screen.title;
+    resp[QLatin1String("revision")]  = screen.revision;
+    resp[QLatin1String("updatedAt")] = screen.updatedAt;
+    resp[QLatin1String("updatedBy")] = screen.updatedBy;
+    resp[QLatin1String("content")]   =
+        QJsonDocument::fromJson(screen.content.toUtf8()).object();
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hmi/screens
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostHmiScreen(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+    const QString id       = body.value(QLatin1String("id")).toString().trimmed();
+
+    if (!hmiIdValid(id))
+        return hmiError(QStringLiteral("'id' must be 1–64 characters: letters, digits, _ or -"),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    const QString title = body.value(QLatin1String("title")).toString();
+    if (title.size() > kHmiTitleMaxLen)
+        return hmiError(QStringLiteral("'title' must be at most %1 characters").arg(kHmiTitleMaxLen),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    QString content;
+    bool    tooLarge = false;
+    QString contentErr;
+    if (!validateHmiContent(body.value(QLatin1String("content")), content, tooLarge, contentErr))
+        return hmiError(contentErr, tooLarge
+                                        ? QHttpServerResponse::StatusCode::PayloadTooLarge
+                                        : QHttpServerResponse::StatusCode::BadRequest);
+
+    Model::HmiScreen screen;
+    screen.id        = id;
+    screen.title     = title;
+    screen.content   = content;
+    screen.updatedBy = sessionUsername(request);
+
+    const int maxScreens = loadConfig(QStringLiteral(SR_CONFIG_FILE)).hmi.maxScreens;
+
+    Model::HmiProject project;
+    QString dbErr;
+    const Model::HmiOpResult op = m_db->insertHmiScreen(screen, maxScreens, project, dbErr);
+
+    switch (op) {
+    case Model::HmiOpResult::Ok:
+        break;
+
+    case Model::HmiOpResult::DuplicateId:
+        return hmiError(QStringLiteral("Screen already exists: %1").arg(id),
+                        QHttpServerResponse::StatusCode::Conflict);
+
+    case Model::HmiOpResult::TooManyScreens: {
+        QJsonObject e;
+        e[QLatin1String("error")]      = QStringLiteral("too many screens");
+        e[QLatin1String("maxScreens")] = maxScreens;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+    }
+    default:
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]              = true;
+    resp[QLatin1String("id")]              = id;
+    resp[QLatin1String("revision")]        = 1;
+    resp[QLatin1String("projectRevision")] = project.revision;
+    resp[QLatin1String("startScreen")]     = hmiStartScreenValue(project.startScreen);
+    return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Created);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/hmi/screens/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePutHmiScreen(const QHttpServerRequest &request,
+                                                  const QString &id)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
+    if (!doc.isObject())
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
+
+    const QJsonObject body = doc.object();
+
+    if (!body.value(QLatin1String("revision")).isDouble())
+        return hmiError(QStringLiteral("'revision' is required"),
+                        QHttpServerResponse::StatusCode::BadRequest);
+
+    QString title;
+    const bool hasTitle = body.contains(QLatin1String("title"));
+    if (hasTitle) {
+        title = body.value(QLatin1String("title")).toString();
+        if (title.size() > kHmiTitleMaxLen)
+            return hmiError(QStringLiteral("'title' must be at most %1 characters").arg(kHmiTitleMaxLen),
+                            QHttpServerResponse::StatusCode::BadRequest);
+    }
+
+    QString content;
+    bool    tooLarge = false;
+    QString contentErr;
+    if (!validateHmiContent(body.value(QLatin1String("content")), content, tooLarge, contentErr))
+        return hmiError(contentErr, tooLarge
+                                        ? QHttpServerResponse::StatusCode::PayloadTooLarge
+                                        : QHttpServerResponse::StatusCode::BadRequest);
+
+    Model::HmiScreen current;
+    QString dbErr;
+    const Model::HmiOpResult op = m_db->updateHmiScreen(
+        id,
+        hasTitle ? &title : nullptr,
+        content,
+        sessionUsername(request),
+        body.value(QLatin1String("revision")).toInt(),
+        current,
+        dbErr);
+
+    switch (op) {
+    case Model::HmiOpResult::Ok:
+        break;
+
+    case Model::HmiOpResult::NotFound:
+        return hmiError(QStringLiteral("Screen not found: %1").arg(id),
+                        QHttpServerResponse::StatusCode::NotFound);
+
+    case Model::HmiOpResult::RevisionMismatch: {
+        QJsonObject e;
+        e[QLatin1String("error")]     = QStringLiteral("revision mismatch");
+        e[QLatin1String("revision")]  = current.revision;
+        e[QLatin1String("updatedAt")] = current.updatedAt;
+        e[QLatin1String("updatedBy")] = current.updatedBy;
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
+    }
+    default:
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]        = true;
+    resp[QLatin1String("revision")]  = current.revision;
+    resp[QLatin1String("updatedAt")] = current.updatedAt;
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/hmi/screens/{id}
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleDeleteHmiScreen(const QHttpServerRequest &request,
+                                                     const QString &id)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    Model::HmiProject project;
+    QString dbErr;
+    const Model::HmiOpResult op = m_db->deleteHmiScreen(id, project, dbErr);
+
+    switch (op) {
+    case Model::HmiOpResult::Ok:
+        break;
+
+    case Model::HmiOpResult::NotFound:
+        return hmiError(QStringLiteral("Screen not found: %1").arg(id),
+                        QHttpServerResponse::StatusCode::NotFound);
+
+    case Model::HmiOpResult::StartScreenProtected:
+        return hmiError(QStringLiteral("start screen"),
+                        QHttpServerResponse::StatusCode::Conflict);
+
+    default:
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]              = true;
+    resp[QLatin1String("projectRevision")] = project.revision;
+    resp[QLatin1String("startScreen")]     = hmiStartScreenValue(project.startScreen);
     return QHttpServerResponse(resp);
 }
 

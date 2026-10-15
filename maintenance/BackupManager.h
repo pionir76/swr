@@ -19,7 +19,8 @@ private:
     static QByteArray buildDevices(const DataCollection::Database::DeviceDatabase *db, QString &error);
     static QByteArray buildRegisters(const DataCollection::Database::DeviceDatabase *db, QString &error);
     static QByteArray buildUsers(const DataCollection::Database::DeviceDatabase *db, QString &error);
-    static QByteArray buildHmi();
+    static QByteArray buildHmi(const DataCollection::Database::DeviceDatabase *db,
+                               QString &error);
     static QByteArray buildChecksum(const QMap<QString, QByteArray> &files);
 };
 

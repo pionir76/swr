@@ -59,6 +59,10 @@ struct TrendConfig {
     QList<TrendChannelConfig> channels;                // max 16
 };
 
+struct HmiConfig {
+    int maxScreens = 50;
+};
+
 struct AppConfig {
     QList<NetInterfaceConfig> networkInterfaces;
     Rs485Config               rs485;
@@ -66,6 +70,7 @@ struct AppConfig {
     ModbusServerConfig        modbusServer;
     LoginSecurityConfig       loginSecurity;
     TrendConfig               trend;
+    HmiConfig                 hmi;
 };
 
 inline QSerialPort::Parity rs485Parity(const Rs485Config &cfg)

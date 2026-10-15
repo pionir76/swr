@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QList>
 #include <QMetaType>
 #include <limits>
@@ -190,6 +191,45 @@ struct HmiTag {
     QString access;                // "" = inherit, "r", "rw"
     QString createdAt;
     QString updatedAt;
+};
+
+struct HmiScreen {
+    QString id;                    // PK (영숫자+_+-, max 64)
+    QString title;
+    QString content;               // compact JSON, backend does not interpret
+    int     revision  = 0;
+    int     sortOrder = 0;
+    QString updatedAt;
+    QString updatedBy;
+};
+
+struct HmiProject {
+    QString name;
+    QString startScreen;           // empty == null (only when no screens exist)
+    int     revision = 0;
+};
+
+// Partial update for PUT /api/hmi/project — only flagged fields are applied.
+struct HmiProjectUpdate {
+    bool        hasName        = false;
+    QString     name;
+    bool        hasStartScreen = false;
+    QString     startScreen;       // empty == null
+    bool        hasOrder       = false;
+    QStringList order;
+    int         revision       = 0;
+};
+
+enum class HmiOpResult {
+    Ok,
+    NotFound,
+    RevisionMismatch,
+    InvalidStartScreen,
+    InvalidOrder,
+    DuplicateId,
+    TooManyScreens,
+    StartScreenProtected,
+    Error
 };
 
 struct LoginHistoryEntry {

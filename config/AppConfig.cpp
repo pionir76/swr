@@ -56,6 +56,8 @@ AppConfig factoryDefaultConfig()
     cfg.loginSecurity.minPasswordLength     = 8;
     cfg.loginSecurity.autoLogout            = true;
 
+    cfg.hmi.maxScreens = 50;
+
     return cfg;
 }
 
@@ -163,6 +165,10 @@ AppConfig loadConfig(const QString &filePath)
         ++chIdx;
     }
 
+    // hmi
+    const QJsonObject hmi = root.value(QLatin1String("hmi")).toObject();
+    config.hmi.maxScreens = hmi.value(QLatin1String("maxScreens")).toInt(50);
+
     return config;
 }
 
@@ -232,6 +238,9 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     tr[QLatin1String("sampleIntervalSec")] = config.trend.sampleIntervalSec;
     tr[QLatin1String("channels")]          = chArr;
 
+    QJsonObject hmi;
+    hmi[QLatin1String("maxScreens")] = config.hmi.maxScreens;
+
     QJsonObject root;
     root[QLatin1String("network")]        = net;
     root[QLatin1String("serial")]         = serial;
@@ -239,6 +248,7 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     root[QLatin1String("modbus_server")]  = mbs;
     root[QLatin1String("login_security")] = ls;
     root[QLatin1String("trend")]          = tr;
+    root[QLatin1String("hmi")]            = hmi;
 
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

@@ -51,7 +51,12 @@ QByteArray BackupManager::create(const DataCollection::Database::DeviceDatabase 
         return {}; 
     }
 
-    const QByteArray hmi       = buildHmi();
+    QString hmiErr;
+    const QByteArray hmi       = buildHmi(db, hmiErr);
+    if (hmi.isNull()) {
+        error = hmiErr;
+        return {};
+    }
 
     QMap<QString, QByteArray> files;
     files[QStringLiteral("manifest.json")]  = manifest;
@@ -269,9 +274,86 @@ QByteArray BackupManager::buildUsers(const DataCollection::Database::DeviceDatab
     return QJsonDocument(arr).toJson(QJsonDocument::Indented);
 }
 
-QByteArray BackupManager::buildHmi()
+QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabase *db,
+                                   QString &error)
 {
-    return QJsonDocument(QJsonObject{}).toJson(QJsonDocument::Indented);
+    using namespace DataCollection::Model;
+
+    HmiProject project;
+    QList<HmiScreen> screens;
+    if (!db->loadHmiProject(project, screens, error))
+        return {};
+
+    const QList<HmiTag> tags = db->loadHmiTags(error);
+    if (!error.isEmpty())
+        return {};
+
+    //-----------------------------------------------------------//
+    // Register ids are reassigned on restore, so each tag is stored
+    // against its unifiedAddress, which is globally unique and stable.
+    //-----------------------------------------------------------//
+    QMap<int, int> registerIdToUnified;
+    {
+        const QList<DeviceInfo> devices = db->loadDevices(error);
+        if (!error.isEmpty())
+            return {};
+        for (const DeviceInfo &d : devices)
+            for (const RegisterConfig &f : d.registers)
+                registerIdToUnified[f.id] = f.unifiedAddress;
+    }
+
+    QJsonObject proj;
+    proj[QLatin1String("name")]        = project.name;
+    proj[QLatin1String("startScreen")] = project.startScreen.isEmpty()
+                                             ? QJsonValue(QJsonValue::Null)
+                                             : QJsonValue(project.startScreen);
+    proj[QLatin1String("revision")]    = project.revision;
+
+    QJsonArray screenArr;
+    for (const HmiScreen &s : screens) {
+        bool found = false;
+        QString loadErr;
+        const HmiScreen full = db->loadHmiScreen(s.id, found, loadErr);
+        if (!loadErr.isEmpty()) {
+            error = loadErr;
+            return {};
+        }
+        if (!found)
+            continue;
+
+        QJsonObject obj;
+        obj[QLatin1String("id")]        = full.id;
+        obj[QLatin1String("title")]     = full.title;
+        obj[QLatin1String("revision")]  = full.revision;
+        obj[QLatin1String("updatedAt")] = full.updatedAt;
+        obj[QLatin1String("updatedBy")] = full.updatedBy;
+        obj[QLatin1String("content")]   =
+            QJsonDocument::fromJson(full.content.toUtf8()).object();
+        screenArr.append(obj);
+    }
+
+    QJsonArray tagArr;
+    for (const HmiTag &t : tags) {
+        QJsonObject obj;
+        obj[QLatin1String("id")]             = t.id;
+        obj[QLatin1String("name")]           = t.name;
+        obj[QLatin1String("unifiedAddress")] = registerIdToUnified.value(t.registerId, -1);
+
+        if (!t.unit.isEmpty())  obj[QLatin1String("unit")]     = t.unit;
+        if (t.hasMin)           obj[QLatin1String("minValue")] = t.minValue;
+        if (t.hasMax)           obj[QLatin1String("maxValue")] = t.maxValue;
+        if (t.hasDecimals)      obj[QLatin1String("decimals")] = t.decimals;
+        if (!t.access.isEmpty()) obj[QLatin1String("access")]  = t.access;
+
+        tagArr.append(obj);
+    }
+
+    QJsonObject root;
+    root[QLatin1String("project")] = proj;
+    root[QLatin1String("screens")] = screenArr;
+    root[QLatin1String("tags")]    = tagArr;
+
+    return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
 
 QByteArray BackupManager::buildChecksum(const QMap<QString, QByteArray> &files)

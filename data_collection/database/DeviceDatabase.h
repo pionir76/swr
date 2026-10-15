@@ -3,8 +3,10 @@
 #include "../model/DeviceModels.h"
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 namespace DataCollection{
 namespace Database{
@@ -61,12 +63,44 @@ public:
     bool updateHmiTag(const Model::HmiTag &tag, QString &error);
     bool deleteHmiTag(const QString &id, QString &error);
 
+    // HMI Project / Screens
+    bool loadHmiProject(Model::HmiProject &project,
+                        QList<Model::HmiScreen> &screens,
+                        QString &error) const;
+
+    Model::HmiOpResult updateHmiProject(const Model::HmiProjectUpdate &update,
+                                        Model::HmiProject &result,
+                                        QString &error);
+
+    Model::HmiScreen loadHmiScreen(const QString &id, bool &found, QString &error) const;
+
+    Model::HmiOpResult insertHmiScreen(const Model::HmiScreen &screen,
+                                       int maxScreens,
+                                       Model::HmiProject &project,
+                                       QString &error);
+
+    // On RevisionMismatch, `current` carries the stored revision/updatedAt/updatedBy.
+    Model::HmiOpResult updateHmiScreen(const QString &id,
+                                       const QString *title,      // nullptr = keep current
+                                       const QString &content,
+                                       const QString &updatedBy,
+                                       int revision,
+                                       Model::HmiScreen &current,
+                                       QString &error);
+
+    Model::HmiOpResult deleteHmiScreen(const QString &id,
+                                       Model::HmiProject &project,
+                                       QString &error);
+
     // Restore
     bool restoreData(bool restoreDevices,
                      const QJsonArray &devices,
                      const QJsonArray &registers,
                      bool restoreUsers,
                      const QJsonArray &users,
+                     bool restoreHmi,
+                     const QJsonObject &hmi,
+                     QStringList &hmiWarnings,
                      QString &error);
 
     // Factory Reset

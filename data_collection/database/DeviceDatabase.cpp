@@ -9,6 +9,8 @@
 #include <QDateTime>
 #include <QCryptographicHash>
 #include <QJsonObject>
+#include <QJsonDocument>
+#include <QMap>
 
 namespace DataCollection {
 namespace Database{
@@ -118,8 +120,9 @@ bool DeviceDatabase::resetSchema(QString& error)
         QStringLiteral("DROP TABLE IF EXISTS login_history"),
 
         QStringLiteral("DROP TABLE IF EXISTS trends"),
-        QStringLiteral("DROP TABLE IF EXISTS hmi_layouts"),
         QStringLiteral("DROP TABLE IF EXISTS hmi_tags"),
+        QStringLiteral("DROP TABLE IF EXISTS hmi_screens"),
+        QStringLiteral("DROP TABLE IF EXISTS hmi_project"),
         QStringLiteral("DROP TABLE IF EXISTS sessions")
     };
 
@@ -140,7 +143,7 @@ bool DeviceDatabase::resetSchema(QString& error)
     //----------------------------------------------------//
     q.exec(QStringLiteral(
         "DELETE FROM sqlite_sequence "
-        "WHERE name IN ('users', 'devices', 'registers', 'trends', 'hmi_layouts', 'sessions')"
+        "WHERE name IN ('users', 'devices', 'registers', 'trends', 'sessions')"
         ));
 
     if (!db.commit()) {
@@ -305,6 +308,39 @@ bool DeviceDatabase::initSchema(QString& error)
             "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "  updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP"
             ")"
+        ),
+
+        //-----------------------------------------------------------//
+        // HMI Project — single row (id is pinned to 1)
+        //-----------------------------------------------------------//
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS hmi_project ("
+            "  id           INTEGER PRIMARY KEY CHECK(id = 1),"
+            "  name         TEXT    NOT NULL DEFAULT '',"
+            "  start_screen TEXT,"
+            "  revision     INTEGER NOT NULL DEFAULT 0"
+            ")"
+        ),
+
+        //-----------------------------------------------------------//
+        // HMI Screens
+        // content is opaque JSON — the backend never interprets it
+        //-----------------------------------------------------------//
+        QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS hmi_screens ("
+            "  id         TEXT    PRIMARY KEY,"
+            "  title      TEXT    NOT NULL,"
+            "  content    TEXT    NOT NULL,"
+            "  revision   INTEGER NOT NULL DEFAULT 1,"
+            "  sort_order INTEGER NOT NULL DEFAULT 0,"
+            "  updated_at TEXT    NOT NULL,"
+            "  updated_by TEXT    NOT NULL DEFAULT ''"
+            ")"
+        ),
+
+        QStringLiteral(
+            "CREATE INDEX IF NOT EXISTS idx_hmi_screens_order "
+            "ON hmi_screens(sort_order)"
         ),
 
     };
@@ -1152,6 +1188,9 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                                  const QJsonArray &registers,
                                  bool restoreUsers,
                                  const QJsonArray &users,
+                                 bool restoreHmi,
+                                 const QJsonObject &hmi,
+                                 QStringList &hmiWarnings,
                                  QString &error)
 {
     if (!isOpen()) {
@@ -1166,6 +1205,46 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     }
 
     QSqlQuery q(db);
+
+    //-----------------------------------------------------------//
+    // Deleting devices cascades to registers and then to hmi_tags.
+    // When HMI is not being restored from the backup, snapshot the
+    // current tags keyed by unifiedAddress so they can be re-linked
+    // to the re-created registers (which receive new ids).
+    //-----------------------------------------------------------//
+    struct TagSnapshot {
+        QString  id;
+        QString  name;
+        int      unifiedAddress = -1;
+        QVariant unit, minValue, maxValue, decimals, access, createdAt, updatedAt;
+    };
+    QList<TagSnapshot> keptTags;
+    const bool relinkTags = restoreDevices && !restoreHmi;
+
+    if (relinkTags) {
+        if (!q.exec(QStringLiteral(
+                "SELECT t.id, t.name, r.unified_register_id, t.unit, t.min_value, "
+                "t.max_value, t.decimals, t.access, t.created_at, t.updated_at "
+                "FROM hmi_tags t JOIN registers r ON r.id = t.register_id"))) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
+        while (q.next()) {
+            TagSnapshot s;
+            s.id             = q.value(0).toString();
+            s.name           = q.value(1).toString();
+            s.unifiedAddress = q.value(2).toInt();
+            s.unit           = q.value(3);
+            s.minValue       = q.value(4);
+            s.maxValue       = q.value(5);
+            s.decimals       = q.value(6);
+            s.access         = q.value(7);
+            s.createdAt      = q.value(8);
+            s.updatedAt      = q.value(9);
+            keptTags.append(s);
+        }
+    }
 
     if (restoreDevices) {
         //-----------------------------------------------------------//
@@ -1256,6 +1335,59 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     }
 
     //-----------------------------------------------------------//
+    // Re-link the snapshotted HMI tags to the re-created registers
+    //-----------------------------------------------------------//
+    if (relinkTags && !keptTags.isEmpty()) {
+        QMap<int, int> unifiedToRegisterId;
+        if (!q.exec(QStringLiteral(
+                "SELECT unified_register_id, id FROM registers WHERE unified_register_id >= 0"))) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
+        while (q.next())
+            unifiedToRegisterId[q.value(0).toInt()] = q.value(1).toInt();
+
+        QStringList dropped;
+        for (const TagSnapshot &s : keptTags) {
+            const int registerId = (s.unifiedAddress >= 0)
+                                   ? unifiedToRegisterId.value(s.unifiedAddress, -1) : -1;
+            if (registerId < 0) {
+                dropped.append(s.id);
+                continue;
+            }
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO hmi_tags "
+                "(id, name, register_id, unit, min_value, max_value, decimals, access, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(s.id);
+            q.addBindValue(s.name);
+            q.addBindValue(registerId);
+            q.addBindValue(s.unit);
+            q.addBindValue(s.minValue);
+            q.addBindValue(s.maxValue);
+            q.addBindValue(s.decimals);
+            q.addBindValue(s.access);
+            q.addBindValue(s.createdAt);
+            q.addBindValue(s.updatedAt);
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+
+        if (!dropped.isEmpty()) {
+            hmiWarnings << QStringLiteral(
+                "%1 existing HMI tag(s) removed — their register is not in the backup: %2")
+                .arg(dropped.size()).arg(dropped.join(QStringLiteral(", ")));
+        }
+    }
+
+    //-----------------------------------------------------------//
     // Restore Users
     //-----------------------------------------------------------//
     if (restoreUsers) {
@@ -1292,6 +1424,169 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 db.rollback();
                 return false;
             }
+        }
+    }
+
+    //-----------------------------------------------------------//
+    // Restore HMI (project + screens + tags)
+    //
+    // HMI tags reference registers by numeric id, but register ids are
+    // reassigned on restore. The backup therefore carries each tag's
+    // unifiedAddress, which is globally unique and stable, and we resolve
+    // it back to the current register id here.
+    //-----------------------------------------------------------//
+    if (restoreHmi) {
+        QMap<int, int> unifiedToRegisterId;
+        {
+            QSqlQuery rq(db);
+            if (!rq.exec(QStringLiteral(
+                    "SELECT unified_register_id, id FROM registers "
+                    "WHERE unified_register_id >= 0"))) {
+                error = rq.lastError().text();
+                db.rollback();
+                return false;
+            }
+            while (rq.next())
+                unifiedToRegisterId[rq.value(0).toInt()] = rq.value(1).toInt();
+        }
+
+        const QStringList wipe = {
+            QStringLiteral("DELETE FROM hmi_tags"),
+            QStringLiteral("DELETE FROM hmi_screens"),
+            QStringLiteral("DELETE FROM hmi_project")
+        };
+        for (const QString &sql : wipe) {
+            if (!q.exec(sql)) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+
+        const QJsonObject proj = hmi[QLatin1String("project")].toObject();
+        const QJsonArray  scrs = hmi[QLatin1String("screens")].toArray();
+        const QJsonArray  tags = hmi[QLatin1String("tags")].toArray();
+
+        //-----------------------------------------------------------//
+        // Screens — sort_order follows the backup's array order
+        //-----------------------------------------------------------//
+        QStringList restoredScreenIds;
+        int sortOrder = 0;
+        for (const QJsonValue &v : scrs) {
+            const QJsonObject obj = v.toObject();
+            const QString id      = obj[QLatin1String("id")].toString();
+            if (id.isEmpty()) continue;
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO hmi_screens "
+                "(id, title, content, revision, sort_order, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(id);
+            q.addBindValue(obj[QLatin1String("title")].toString());
+            q.addBindValue(QJsonDocument(obj[QLatin1String("content")].toObject())
+                               .toJson(QJsonDocument::Compact));
+            q.addBindValue(obj[QLatin1String("revision")].toInt(1));
+            q.addBindValue(sortOrder++);
+            q.addBindValue(obj[QLatin1String("updatedAt")].toString(
+                               QDateTime::currentDateTime().toString(Qt::ISODate)));
+            q.addBindValue(obj[QLatin1String("updatedBy")].toString());
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+            restoredScreenIds.append(id);
+        }
+
+        //-----------------------------------------------------------//
+        // Project — startScreen must point at a restored screen
+        //-----------------------------------------------------------//
+        QString startScreen = proj[QLatin1String("startScreen")].toString();
+        if (!startScreen.isEmpty() && !restoredScreenIds.contains(startScreen)) {
+            hmiWarnings << QStringLiteral(
+                "Backup start screen '%1' is missing; falling back to '%2'")
+                .arg(startScreen,
+                     restoredScreenIds.isEmpty() ? QStringLiteral("(none)")
+                                                 : restoredScreenIds.first());
+            startScreen = restoredScreenIds.value(0);
+        }
+        if (startScreen.isEmpty() && !restoredScreenIds.isEmpty())
+            startScreen = restoredScreenIds.first();
+
+        q.prepare(QStringLiteral(
+            "INSERT INTO hmi_project (id, name, start_screen, revision) "
+            "VALUES (1, ?, ?, ?)"));
+        q.addBindValue(proj[QLatin1String("name")].toString());
+        q.addBindValue(startScreen.isEmpty() ? QVariant(QMetaType(QMetaType::QString))
+                                             : QVariant(startScreen));
+        q.addBindValue(proj[QLatin1String("revision")].toInt(0));
+        if (!q.exec()) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
+
+        //-----------------------------------------------------------//
+        // Tags — resolve unifiedAddress back to the current register id
+        //-----------------------------------------------------------//
+        int droppedTags = 0;
+        for (const QJsonValue &v : tags) {
+            const QJsonObject obj = v.toObject();
+            const QString id      = obj[QLatin1String("id")].toString();
+            if (id.isEmpty()) continue;
+
+            const QJsonValue unified = obj[QLatin1String("unifiedAddress")];
+            if (!unified.isDouble()) {
+                ++droppedTags;
+                continue;
+            }
+
+            const int registerId = unifiedToRegisterId.value(unified.toInt(-1), -1);
+            if (registerId < 0) {
+                ++droppedTags;
+                continue;
+            }
+
+            auto optReal = [&obj](const char *key) -> QVariant {
+                const QJsonValue v2 = obj[QLatin1String(key)];
+                return v2.isDouble() ? QVariant(v2.toDouble())
+                                     : QVariant(QMetaType(QMetaType::Double));
+            };
+
+            q.prepare(QStringLiteral(
+                "INSERT INTO hmi_tags "
+                "(id, name, register_id, unit, min_value, max_value, decimals, access) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
+            q.addBindValue(id);
+            q.addBindValue(obj[QLatin1String("name")].toString());
+            q.addBindValue(registerId);
+
+            const QString unit = obj[QLatin1String("unit")].toString();
+            q.addBindValue(unit.isEmpty() ? QVariant(QMetaType(QMetaType::QString))
+                                          : QVariant(unit));
+            q.addBindValue(optReal("minValue"));
+            q.addBindValue(optReal("maxValue"));
+
+            const QJsonValue dec = obj[QLatin1String("decimals")];
+            q.addBindValue(dec.isDouble() ? QVariant(dec.toInt())
+                                          : QVariant(QMetaType(QMetaType::Int)));
+
+            const QString access = obj[QLatin1String("access")].toString();
+            q.addBindValue(access.isEmpty() ? QVariant(QMetaType(QMetaType::QString))
+                                            : QVariant(access));
+
+            if (!q.exec()) {
+                error = q.lastError().text();
+                db.rollback();
+                return false;
+            }
+        }
+
+        if (droppedTags > 0) {
+            hmiWarnings << QStringLiteral(
+                "%1 HMI tag(s) skipped — their register is not present on this device")
+                .arg(droppedTags);
         }
     }
 
@@ -1335,6 +1630,24 @@ bool DeviceDatabase::factoryReset(QString &error)
         error = q.lastError().text();
         db.rollback();
         return false;
+    }
+
+    //----------------------------------------------------//
+    // Delete All HMI data
+    // hmi_tags is already cascaded by the device delete above,
+    // but screens and the project are independent of devices.
+    //----------------------------------------------------//
+    const QStringList hmiDeletes = {
+        QStringLiteral("DELETE FROM hmi_tags"),
+        QStringLiteral("DELETE FROM hmi_screens"),
+        QStringLiteral("DELETE FROM hmi_project")
+    };
+    for (const QString &sql : hmiDeletes) {
+        if (!q.exec(sql)) {
+            error = q.lastError().text();
+            db.rollback();
+            return false;
+        }
     }
 
     //----------------------------------------------------//
@@ -1461,6 +1774,471 @@ bool DeviceDatabase::deleteHmiTag(const QString &id, QString &error)
     if (!q.exec()) { error = q.lastError().text(); return false; }
     if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(id); return false; }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// HMI Project / Screens
+// ---------------------------------------------------------------------------
+namespace {
+
+QString hmiNow()
+{
+    return QDateTime::currentDateTime().toString(Qt::ISODate);
+}
+
+bool ensureHmiProjectRow(QSqlDatabase &db, QString &error)
+{
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "INSERT OR IGNORE INTO hmi_project (id, name, start_screen, revision) "
+            "VALUES (1, '', NULL, 0)"))) {
+        error = q.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool readHmiProjectRow(QSqlDatabase &db, Model::HmiProject &project, QString &error)
+{
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT name, start_screen, revision FROM hmi_project WHERE id=1"))) {
+        error = q.lastError().text();
+        return false;
+    }
+    if (!q.next())
+        return true;  // caller treats this as the empty default
+
+    project.name        = q.value(0).toString();
+    project.startScreen = q.value(1).toString();
+    project.revision    = q.value(2).toInt();
+    return true;
+}
+
+QStringList readHmiScreenIds(QSqlDatabase &db, QString &error)
+{
+    QStringList ids;
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("SELECT id FROM hmi_screens ORDER BY sort_order, id"))) {
+        error = q.lastError().text();
+        return ids;
+    }
+    while (q.next())
+        ids.append(q.value(0).toString());
+    return ids;
+}
+
+bool bumpHmiProjectRevision(QSqlDatabase &db, int &newRevision, QString &error)
+{
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "UPDATE hmi_project SET revision = revision + 1 WHERE id=1"))) {
+        error = q.lastError().text();
+        return false;
+    }
+    if (!q.exec(QStringLiteral("SELECT revision FROM hmi_project WHERE id=1"))) {
+        error = q.lastError().text();
+        return false;
+    }
+    if (q.next())
+        newRevision = q.value(0).toInt();
+    return true;
+}
+
+} // namespace
+
+bool DeviceDatabase::loadHmiProject(Model::HmiProject &project,
+                                    QList<Model::HmiScreen> &screens,
+                                    QString &error) const
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return false;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+
+    if (!readHmiProjectRow(db, project, error))
+        return false;
+
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral(
+            "SELECT id, title, revision, sort_order, updated_at, updated_by "
+            "FROM hmi_screens ORDER BY sort_order, id"))) {
+        error = q.lastError().text();
+        return false;
+    }
+
+    while (q.next()) {
+        Model::HmiScreen s;
+        s.id        = q.value(0).toString();
+        s.title     = q.value(1).toString();
+        s.revision  = q.value(2).toInt();
+        s.sortOrder = q.value(3).toInt();
+        s.updatedAt = q.value(4).toString();
+        s.updatedBy = q.value(5).toString();
+        screens.append(s);
+    }
+    return true;
+}
+
+Model::HmiOpResult DeviceDatabase::updateHmiProject(const Model::HmiProjectUpdate &update,
+                                                    Model::HmiProject &result,
+                                                    QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return Model::HmiOpResult::Error;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return Model::HmiOpResult::Error;
+    }
+
+    auto fail = [&db](Model::HmiOpResult r) {
+        db.rollback();
+        return r;
+    };
+
+    if (!ensureHmiProjectRow(db, error))
+        return fail(Model::HmiOpResult::Error);
+
+    Model::HmiProject current;
+    if (!readHmiProjectRow(db, current, error))
+        return fail(Model::HmiOpResult::Error);
+
+    if (current.revision != update.revision) {
+        result = current;
+        return fail(Model::HmiOpResult::RevisionMismatch);
+    }
+
+    const QStringList ids = readHmiScreenIds(db, error);
+    if (!error.isEmpty())
+        return fail(Model::HmiOpResult::Error);
+
+    //-----------------------------------------------------------//
+    // startScreen may be null only while no screen exists
+    //-----------------------------------------------------------//
+    if (update.hasStartScreen) {
+        if (update.startScreen.isEmpty()) {
+            if (!ids.isEmpty())
+                return fail(Model::HmiOpResult::InvalidStartScreen);
+        } else if (!ids.contains(update.startScreen)) {
+            return fail(Model::HmiOpResult::InvalidStartScreen);
+        }
+    }
+
+    //-----------------------------------------------------------//
+    // order must be a permutation of the existing screen ids
+    //-----------------------------------------------------------//
+    if (update.hasOrder) {
+        QStringList sortedGiven = update.order;
+        QStringList sortedHave  = ids;
+        sortedGiven.sort();
+        sortedHave.sort();
+        if (sortedGiven != sortedHave)
+            return fail(Model::HmiOpResult::InvalidOrder);
+    }
+
+    QSqlQuery q(db);
+
+    if (update.hasName) {
+        q.prepare(QStringLiteral("UPDATE hmi_project SET name=? WHERE id=1"));
+        q.addBindValue(update.name);
+        if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    }
+
+    if (update.hasStartScreen) {
+        q.prepare(QStringLiteral("UPDATE hmi_project SET start_screen=? WHERE id=1"));
+        q.addBindValue(update.startScreen.isEmpty()
+                           ? QVariant(QMetaType(QMetaType::QString))
+                           : QVariant(update.startScreen));
+        if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    }
+
+    if (update.hasOrder) {
+        for (int i = 0; i < update.order.size(); ++i) {
+            q.prepare(QStringLiteral("UPDATE hmi_screens SET sort_order=? WHERE id=?"));
+            q.addBindValue(i);
+            q.addBindValue(update.order.at(i));
+            if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+        }
+    }
+
+    int newRevision = current.revision;
+    if (!bumpHmiProjectRevision(db, newRevision, error))
+        return fail(Model::HmiOpResult::Error);
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+
+    result.name        = update.hasName        ? update.name        : current.name;
+    result.startScreen = update.hasStartScreen ? update.startScreen : current.startScreen;
+    result.revision    = newRevision;
+    return Model::HmiOpResult::Ok;
+}
+
+Model::HmiScreen DeviceDatabase::loadHmiScreen(const QString &id, bool &found, QString &error) const
+{
+    found = false;
+    Model::HmiScreen screen;
+
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return screen;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT id, title, content, revision, sort_order, updated_at, updated_by "
+        "FROM hmi_screens WHERE id=?"));
+    q.addBindValue(id);
+
+    if (!q.exec()) { error = q.lastError().text(); return screen; }
+    if (!q.next()) return screen;
+
+    screen.id        = q.value(0).toString();
+    screen.title     = q.value(1).toString();
+    screen.content   = q.value(2).toString();
+    screen.revision  = q.value(3).toInt();
+    screen.sortOrder = q.value(4).toInt();
+    screen.updatedAt = q.value(5).toString();
+    screen.updatedBy = q.value(6).toString();
+    found = true;
+    return screen;
+}
+
+Model::HmiOpResult DeviceDatabase::insertHmiScreen(const Model::HmiScreen &screen,
+                                                   int maxScreens,
+                                                   Model::HmiProject &project,
+                                                   QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return Model::HmiOpResult::Error;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return Model::HmiOpResult::Error;
+    }
+
+    auto fail = [&db](Model::HmiOpResult r) {
+        db.rollback();
+        return r;
+    };
+
+    if (!ensureHmiProjectRow(db, error))
+        return fail(Model::HmiOpResult::Error);
+
+    Model::HmiProject current;
+    if (!readHmiProjectRow(db, current, error))
+        return fail(Model::HmiOpResult::Error);
+
+    QSqlQuery q(db);
+
+    if (!q.exec(QStringLiteral("SELECT COUNT(*), COALESCE(MAX(sort_order), -1) FROM hmi_screens"))) {
+        error = q.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+    q.next();
+    const int count       = q.value(0).toInt();
+    const int maxSortOrder = q.value(1).toInt();
+
+    if (count >= maxScreens)
+        return fail(Model::HmiOpResult::TooManyScreens);
+
+    q.prepare(QStringLiteral("SELECT 1 FROM hmi_screens WHERE id=?"));
+    q.addBindValue(screen.id);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    if (q.next())
+        return fail(Model::HmiOpResult::DuplicateId);
+
+    const QString now = hmiNow();
+
+    q.prepare(QStringLiteral(
+        "INSERT INTO hmi_screens (id, title, content, revision, sort_order, updated_at, updated_by) "
+        "VALUES (?, ?, ?, 1, ?, ?, ?)"));
+    q.addBindValue(screen.id);
+    q.addBindValue(screen.title);
+    q.addBindValue(screen.content);
+    q.addBindValue(maxSortOrder + 1);
+    q.addBindValue(now);
+    q.addBindValue(screen.updatedBy);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+
+    //-----------------------------------------------------------//
+    // First screen becomes the start screen
+    //-----------------------------------------------------------//
+    QString startScreen = current.startScreen;
+    if (count == 0) {
+        startScreen = screen.id;
+        q.prepare(QStringLiteral("UPDATE hmi_project SET start_screen=? WHERE id=1"));
+        q.addBindValue(startScreen);
+        if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    }
+
+    int newRevision = current.revision;
+    if (!bumpHmiProjectRevision(db, newRevision, error))
+        return fail(Model::HmiOpResult::Error);
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+
+    project.name        = current.name;
+    project.startScreen = startScreen;
+    project.revision    = newRevision;
+    return Model::HmiOpResult::Ok;
+}
+
+Model::HmiOpResult DeviceDatabase::updateHmiScreen(const QString &id,
+                                                   const QString *title,
+                                                   const QString &content,
+                                                   const QString &updatedBy,
+                                                   int revision,
+                                                   Model::HmiScreen &current,
+                                                   QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return Model::HmiOpResult::Error;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return Model::HmiOpResult::Error;
+    }
+
+    auto fail = [&db](Model::HmiOpResult r) {
+        db.rollback();
+        return r;
+    };
+
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral(
+        "SELECT title, revision, updated_at, updated_by FROM hmi_screens WHERE id=?"));
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    if (!q.next())
+        return fail(Model::HmiOpResult::NotFound);
+
+    current.id        = id;
+    current.title     = q.value(0).toString();
+    current.revision  = q.value(1).toInt();
+    current.updatedAt = q.value(2).toString();
+    current.updatedBy = q.value(3).toString();
+
+    if (current.revision != revision)
+        return fail(Model::HmiOpResult::RevisionMismatch);
+
+    const QString now = hmiNow();
+
+    q.prepare(QStringLiteral(
+        "UPDATE hmi_screens SET title=?, content=?, revision=revision+1, "
+        "updated_at=?, updated_by=? WHERE id=?"));
+    q.addBindValue(title ? *title : current.title);
+    q.addBindValue(content);
+    q.addBindValue(now);
+    q.addBindValue(updatedBy);
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+
+    if (title) current.title = *title;
+    current.revision  = revision + 1;
+    current.updatedAt = now;
+    current.updatedBy = updatedBy;
+    return Model::HmiOpResult::Ok;
+}
+
+Model::HmiOpResult DeviceDatabase::deleteHmiScreen(const QString &id,
+                                                   Model::HmiProject &project,
+                                                   QString &error)
+{
+    if (!isOpen()) {
+        error = QStringLiteral("Database is not open.");
+        return Model::HmiOpResult::Error;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        return Model::HmiOpResult::Error;
+    }
+
+    auto fail = [&db](Model::HmiOpResult r) {
+        db.rollback();
+        return r;
+    };
+
+    if (!ensureHmiProjectRow(db, error))
+        return fail(Model::HmiOpResult::Error);
+
+    Model::HmiProject current;
+    if (!readHmiProjectRow(db, current, error))
+        return fail(Model::HmiOpResult::Error);
+
+    QSqlQuery q(db);
+
+    q.prepare(QStringLiteral("SELECT 1 FROM hmi_screens WHERE id=?"));
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+    if (!q.next())
+        return fail(Model::HmiOpResult::NotFound);
+
+    if (!q.exec(QStringLiteral("SELECT COUNT(*) FROM hmi_screens"))) {
+        error = q.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+    q.next();
+    const int count = q.value(0).toInt();
+
+    //-----------------------------------------------------------//
+    // The start screen is protected only while another screen remains,
+    // otherwise deleting the last screen would be impossible.
+    //-----------------------------------------------------------//
+    QString startScreen = current.startScreen;
+    if (startScreen == id) {
+        if (count > 1)
+            return fail(Model::HmiOpResult::StartScreenProtected);
+
+        startScreen.clear();
+        if (!q.exec(QStringLiteral("UPDATE hmi_project SET start_screen=NULL WHERE id=1"))) {
+            error = q.lastError().text();
+            return fail(Model::HmiOpResult::Error);
+        }
+    }
+
+    q.prepare(QStringLiteral("DELETE FROM hmi_screens WHERE id=?"));
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return fail(Model::HmiOpResult::Error); }
+
+    int newRevision = current.revision;
+    if (!bumpHmiProjectRevision(db, newRevision, error))
+        return fail(Model::HmiOpResult::Error);
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        return fail(Model::HmiOpResult::Error);
+    }
+
+    project.name        = current.name;
+    project.startScreen = startScreen;
+    project.revision    = newRevision;
+    return Model::HmiOpResult::Ok;
 }
 
 } // namespace Database

@@ -188,9 +188,27 @@ RestorePreview RestoreManager::validate(const QByteArray &zipData, QString &erro
     }
 
     if (files.contains(QStringLiteral("hmi.json"))) {
-        preview.hmi.available = true;
-        preview.hmi.count     = 1;
-        preview.hmi.warning   = QStringLiteral("HMI restore is not yet implemented");
+        const QJsonObject obj = QJsonDocument::fromJson(files[QStringLiteral("hmi.json")]).object();
+        const int screenCount = obj.value(QLatin1String("screens")).toArray().size();
+        const int tagCount    = obj.value(QLatin1String("tags")).toArray().size();
+
+        preview.hmi.available = (screenCount > 0 || tagCount > 0);
+        preview.hmi.count     = screenCount;
+
+        if (preview.hmi.available) {
+            preview.hmi.warning = QStringLiteral(
+                "Existing HMI screens and tags will be replaced (%1 screen(s), %2 tag(s))")
+                .arg(screenCount).arg(tagCount);
+
+            //-----------------------------------------------------------//
+            // HMI tags resolve to registers by unifiedAddress, so restoring
+            // HMI without registers drops any tag whose address is absent here.
+            //-----------------------------------------------------------//
+            if (tagCount > 0)
+                preview.warnings << QStringLiteral(
+                    "Restoring HMI without registers will drop HMI tags whose "
+                    "unifiedAddress does not exist on this device");
+        }
     }
 
     //-----------------------------------------------------------//
@@ -286,20 +304,32 @@ bool RestoreManager::apply(const QString &restoreId,
             ? QJsonDocument::fromJson(readJson(QStringLiteral("users.json"), ok)).array()
             : QJsonArray{};
 
+    const QJsonObject hmiObj =
+        (options.hmi)
+            ? QJsonDocument::fromJson(readJson(QStringLiteral("hmi.json"), ok)).object()
+            : QJsonObject{};
+
     //-----------------------------------------------------------//
-    // 5. DB (devices + registers + users)
+    // 5. DB (devices + registers + users + hmi)
     //-----------------------------------------------------------//
-    if (options.devices || options.users) {
-        if (!db->restoreData(options.devices, 
-                             devicesArr, 
+    if (options.devices || options.users || options.hmi) {
+        QStringList hmiWarnings;
+        if (!db->restoreData(options.devices,
+                             devicesArr,
                              registersArr,
-                             options.users, 
-                             usersArr, 
+                             options.users,
+                             usersArr,
+                             options.hmi,
+                             hmiObj,
+                             hmiWarnings,
                              error)) {
             Util::Logger::error(QStringLiteral("Restore DB failed: %1").arg(error));
             QDir(dir).removeRecursively();
             return false;
         }
+
+        for (const QString &w : hmiWarnings)
+            Util::Logger::warning(QStringLiteral("Restore HMI: %1").arg(w));
     }
 
     //-----------------------------------------------------------//

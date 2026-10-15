@@ -126,6 +126,14 @@ private:
     QHttpServerResponse handleGetHmiValues(const QHttpServerRequest &request);
     QHttpServerResponse handlePostHmiWrite(const QHttpServerRequest &request);
 
+    // HMI Project / Screens
+    QHttpServerResponse handleGetHmiProject(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutHmiProject(const QHttpServerRequest &request);
+    QHttpServerResponse handleGetHmiScreen(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handlePostHmiScreen(const QHttpServerRequest &request);
+    QHttpServerResponse handlePutHmiScreen(const QHttpServerRequest &request, const QString &id);
+    QHttpServerResponse handleDeleteHmiScreen(const QHttpServerRequest &request, const QString &id);
+
     // Trend Config (채널/샘플간격 설정 — TrendFileRecorder 에서 읽음)
     QHttpServerResponse handleGetTrendConfig(const QHttpServerRequest &request);
     QHttpServerResponse handlePutTrendConfig(const QHttpServerRequest &request);

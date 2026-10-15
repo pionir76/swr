@@ -26,7 +26,7 @@ struct BackupManifest {
         bool devices   = true;
         bool registers = true;
         bool users     = true;
-        bool hmi       = false;
+        bool hmi       = true;
     } contents;
 };
 
@@ -40,7 +40,7 @@ struct RestoreOptions {
     bool devices   = true;
     bool registers = true;
     bool users     = true;
-    bool hmi       = false;
+    bool hmi       = true;
 };
 
 struct RestoreItemInfo {

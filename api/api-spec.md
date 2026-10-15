@@ -1,6 +1,6 @@
 # SmartRoute REST API 명세
 
-> 최종 수정: 2026-10-14 (pollMode/effectiveIntervalMs 추가, HMI 태그 API 추가)  
+> 최종 수정: 2026-10-15 (HMI 화면 저장/불러오기 API 추가, 백업/복원 HMI 포함)  
 > Base URL: `http://<device-ip>:8080`  
 > 응답 형식: `application/json` (바이너리 응답 제외)
 
@@ -1236,7 +1236,7 @@ Content-Type: `application/octet-stream`
 
 ---
 
-## 14. HMI 태그
+## 14. HMI (태그 / 화면)
 
 레지스터 `tagName`과 별도의 독립된 네임스페이스. 레지스터를 "소스"로 느슨하게 참조하며, 레지스터 이름이 바뀌어도 HMI 화면은 영향받지 않음.
 
@@ -1358,6 +1358,119 @@ coil 타입 레지스터는 `v`에 JSON boolean(`true`/`false`) 또는 숫자(`0
 
 ---
 
+### HMI 프로젝트 / 화면
+
+디바이스당 프로젝트 1개, 그 아래 화면 여러 개. 화면 `content`는 백엔드가 해석하지 않고 저장·반환만 합니다.
+
+**공통 규칙**
+- 화면 `id`: `^[A-Za-z0-9_-]{1,64}$`
+- `title`: 최대 64자
+- `content`: JSON 객체, `content.format == "whmi.screen"` 필수 (그 외 구조는 검사 안 함)
+- `content` 크기: 직렬화 기준 최대 256KB (262144 bytes), 초과 시 413
+- 화면 개수: 최대 `config.json`의 `hmi.maxScreens` (기본 50)
+- `updatedAt`: ISO-8601 로컬 시각, 타임존 없음 (`2026-10-15T11:20:00`)
+- `updatedBy`: 요청한 사용자 이름 (서버가 채움)
+- `content`는 재직렬화 저장: 배열 순서·숫자 값은 그대로 보존, 객체 키 순서·공백은 바뀔 수 있음
+
+**revision (낙관적 잠금)**
+- 화면 revision: 화면 저장(PUT) 시 +1
+- 프로젝트 revision: 이름·시작 화면·순서 변경(PUT project), 화면 생성(POST), 화면 삭제(DELETE) 시 +1
+- 화면 제목만 바꿔도 프로젝트 revision은 바뀌지 않음 (제목의 원본은 화면 쪽)
+
+**startScreen 규칙**
+- 화면이 0개일 때만 `null`, 1개 이상이면 반드시 존재하는 화면
+- 첫 화면 생성 시 자동 지정, 마지막 화면 삭제 시 자동으로 `null`
+
+### GET /api/hmi/project
+권한: `Any`
+
+**응답** 200
+```json
+{
+  "name": "냉동 설비 통합 모니터링",
+  "startScreen": "main",
+  "screens": [
+    { "id": "main",    "title": "냉동 설비 통합 모니터링", "revision": 3, "updatedAt": "2026-10-15T10:00:00", "updatedBy": "admin" },
+    { "id": "chiller", "title": "메인칠러 모니터링",       "revision": 7, "updatedAt": "2026-10-15T11:20:00", "updatedBy": "manager1" }
+  ],
+  "revision": 2
+}
+```
+`screens` 배열 순서 = 화면 목록 표시 순서.  
+화면이 없으면 `{ "name": "", "startScreen": null, "screens": [], "revision": <n> }`
+
+### PUT /api/hmi/project
+권한: `ManagerOrAbove`
+
+**요청 바디** (`revision` 필수, 나머지는 바꿀 것만)
+```json
+{ "name": "냉동 설비 통합 모니터링", "startScreen": "chiller", "order": ["chiller", "main"], "revision": 2 }
+```
+
+**응답** 200: `{ "ok": true, "revision": 3 }`  
+**에러** 400: `revision` 누락 / `startScreen`이 없는 화면 / 화면이 있는데 `startScreen: null` / `order`가 현재 화면 id를 빠짐없이·중복 없이 담지 않음  
+**에러** 409: `{ "error": "revision mismatch", "revision": 4 }`
+
+### GET /api/hmi/screens/{id}
+권한: `Any`
+
+**응답** 200
+```json
+{
+  "id": "chiller",
+  "title": "메인칠러 모니터링",
+  "revision": 7,
+  "updatedAt": "2026-10-15T11:20:00",
+  "updatedBy": "manager1",
+  "content": { "format": "whmi.screen", "version": "0.1", "size": { "w": 1280, "h": 720 }, "widgets": [] }
+}
+```
+**에러** 404: 화면 없음
+
+### POST /api/hmi/screens
+권한: `ManagerOrAbove`
+
+**요청 바디**
+```json
+{ "id": "boiler", "title": "보일러", "content": { "format": "whmi.screen", "version": "0.1", "size": { "w": 1280, "h": 720 }, "widgets": [] } }
+```
+프로젝트 `screens` 맨 뒤에 추가. 첫 화면이면 `startScreen`으로 지정.
+
+**응답** 201
+```json
+{ "ok": true, "id": "boiler", "revision": 1, "projectRevision": 3, "startScreen": "main" }
+```
+**에러** 400: id 형식 / title 길이 / content 오류  
+**에러** 409: id 중복 `{ "error": "Screen already exists: boiler" }`  
+**에러** 409: 개수 초과 `{ "error": "too many screens", "maxScreens": 50 }`  
+**에러** 413: content 크기 초과
+
+### PUT /api/hmi/screens/{id}
+권한: `ManagerOrAbove`
+
+**요청 바디** (`title` 생략 가능, `content`·`revision` 필수)
+```json
+{ "title": "메인칠러 모니터링", "content": { "format": "whmi.screen", "widgets": [] }, "revision": 7 }
+```
+
+**응답** 200: `{ "ok": true, "revision": 8, "updatedAt": "2026-10-15T11:25:00" }`  
+**에러** 409: `{ "error": "revision mismatch", "revision": 9, "updatedAt": "2026-10-15T11:24:00", "updatedBy": "manager1" }`  
+**에러** 400: `revision` 누락 / title 길이 / content 오류  
+**에러** 404: 화면 없음  
+**에러** 413: content 크기 초과
+
+### DELETE /api/hmi/screens/{id}
+권한: `ManagerOrAbove`
+
+프로젝트 `screens`에서도 제거.
+
+**응답** 200: `{ "ok": true, "projectRevision": 4, "startScreen": "main" }`  
+(마지막 화면 삭제 시 `"startScreen": null`)  
+**에러** 409: 다른 화면이 남아 있는데 시작 화면 삭제 시도 `{ "error": "start screen" }`  
+**에러** 404: 화면 없음
+
+---
+
 ## 15. 유지보수
 
 ### GET /api/maintenance/backup
@@ -1368,7 +1481,9 @@ Content-Disposition: `attachment; filename="swr_backup_YYYYMMdd_HHmmss.zip"`
 
 **Response**: 설정 백업 ZIP 파일 (binary)
 
-> 포함 내용: 장비, 레지스터, 사용자, 시스템 설정 (config.json)
+> 포함 내용: 장비, 레지스터, 사용자, 시스템 설정 (config.json), HMI 프로젝트·화면·태그 (hmi.json)
+>
+> `hmi.json`의 태그는 `registerId` 대신 `unifiedAddress`로 레지스터를 가리킵니다. 레지스터 id는 복원 시 새로 부여되므로, 복원 시 `unifiedAddress`로 현재 레지스터를 다시 찾아 연결합니다.
 
 ---
 
@@ -1394,10 +1509,14 @@ Content-Disposition: `attachment; filename="swr_backup_YYYYMMdd_HHmmss.zip"`
   "devices":   { "available": true, "count": 3,  "warning": "" },
   "registers": { "available": true, "count": 24, "warning": "" },
   "users":     { "available": true, "count": 2,  "warning": "" },
-  "hmi":       { "available": false,"count": 0,  "warning": "" },
-  "warnings":  []
+  "hmi":       { "available": true, "count": 2,  "warning": "Existing HMI screens and tags will be replaced (2 screen(s), 28 tag(s))" },
+  "warnings":  [
+    "Restoring HMI without registers will drop HMI tags whose unifiedAddress does not exist on this device"
+  ]
 }
 ```
+
+> `hmi.count`는 화면 개수. HMI 태그가 있는 백업이면 `warnings`에 레지스터 의존 경고가 포함됩니다 (`options.hmi: true` + `options.registers: false` 조합 시 프론트가 표시).
 
 **에러** 422: 파일 무결성 검증 실패
 
@@ -1416,12 +1535,14 @@ Content-Disposition: `attachment; filename="swr_backup_YYYYMMdd_HHmmss.zip"`
     "devices":   true,
     "registers": true,
     "users":     true,
-    "hmi":       false
+    "hmi":       true
   }
 }
 ```
 
-> `network` 기본값 `false` (IP 변경으로 접속 불능 방지)
+> `network` 기본값 `false` (IP 변경으로 접속 불능 방지)  
+> `hmi` 기본값 `true`. HMI 복원은 병합이 아닌 **전체 교체** (기존 프로젝트·화면·태그 삭제 후 백업 내용으로 대체). 현재 장치에 해당 `unifiedAddress` 레지스터가 없는 태그는 건너뜁니다.  
+> `devices: true` + `hmi: false`이면 HMI 프로젝트·화면은 그대로 두고, **기존 HMI 태그는 `unifiedAddress`로 새로 만들어진 레지스터에 다시 연결**합니다. 백업에 없는 레지스터를 가리키던 태그는 삭제되며, 삭제된 태그 id는 시스템 로그(warning)에 기록됩니다.
 
 **Response 200**
 ```json
@@ -1433,7 +1554,7 @@ Content-Disposition: `attachment; filename="swr_backup_YYYYMMdd_HHmmss.zip"`
 ### POST /api/maintenance/factory-reset
 권한: `AdminOnly` | 폴링 중 409
 
-DB(장비/레지스터/사용자) 전체 삭제, 설정 파일 초기화, 로그 전체 삭제, admin 비밀번호 초기화를 수행합니다.
+DB(장비/레지스터/사용자/HMI 프로젝트·화면·태그) 전체 삭제, 설정 파일 초기화, 로그 전체 삭제, admin 비밀번호 초기화를 수행합니다.
 
 **Response 200**
 ```json
