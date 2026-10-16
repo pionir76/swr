@@ -19,7 +19,7 @@ enum class LogLevel {
 
 struct LogEntry {
     qint64    id        = -1;
-    QDateTime timestamp;
+    QString   timestamp;          // ISO-8601 local, e.g. "2026-10-16T10:30:00"
     LogLevel  level     = LogLevel::Info;
     QString   message;
 };

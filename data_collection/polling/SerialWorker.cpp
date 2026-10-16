@@ -24,13 +24,12 @@ SerialWorker::SerialWorker(QList<Model::DeviceInfo> m_devices,
 
 void SerialWorker::stop()
 {
-    m_running = false;
+    requestStop();
     wait();
 }
 
 void SerialWorker::run()
 {
-    m_running = true;
     QString openError;
 
     //-----------------------------------------------------------//

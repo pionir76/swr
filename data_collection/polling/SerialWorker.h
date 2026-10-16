@@ -22,7 +22,8 @@ public:
                  std::shared_ptr<Store::DeviceList> deviceList,
                  QObject* parent = nullptr);
 
-    void stop();
+    void requestStop() { m_running = false; }   // returns immediately
+    void stop();                                 // requestStop() + wait()
 
 protected:
     void run() override;
@@ -31,7 +32,7 @@ private:
     QList<Model::DeviceInfo> m_devices;
     std::shared_ptr<Store::RegisterTable> m_registerTable;
     std::shared_ptr<Store::DeviceList> m_deviceList;
-    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_running{true};
 };
 
 } // namespace Polling

@@ -81,6 +81,15 @@ void PollingManager::stop()
 {
     if (!m_running) return;
 
+    //-----------------------------------------------------------//
+    // Signal every worker first, then wait, so the total wait is the
+    // slowest worker rather than the sum of all of them.
+    //-----------------------------------------------------------//
+    if (m_serialWorker)
+        m_serialWorker->requestStop();
+    for (TcpWorker *w : m_tcpWorkers)
+        w->requestStop();
+
     if (m_serialWorker) {
         m_serialWorker->stop();
         m_serialWorker.reset();

@@ -5,6 +5,8 @@
 #include <QFileInfo>
 #include <QDateTime>
 
+#include <ctime>
+
 namespace TrendHandler {
 
 // Convenience aliases for writer constants
@@ -19,9 +21,23 @@ static constexpr qint64 kRpB    = TrendFileWriter::kRecordsPerBlock;
 // ---------------------------------------------------------------------------
 quint32 TrendFileReader::stimeToUnix(const quint8 stime[6])
 {
-    const QDateTime dt(QDate(2000 + stime[0], stime[1], stime[2]),
-                       QTime(stime[3], stime[4], stime[5]));
-    return dt.isValid() ? static_cast<quint32>(dt.toSecsSinceEpoch()) : 0;
+    if (!QDate::isValid(2000 + stime[0], stime[1], stime[2])
+        || !QTime::isValid(stime[3], stime[4], stime[5]))
+        return 0;
+
+    // Building a local QDateTime from date + time costs ~6ms on this CPU
+    // (Asia/Seoul); libc mktime gives the same result in ~30us.
+    std::tm t{};
+    t.tm_year  = 100 + stime[0];
+    t.tm_mon   = stime[1] - 1;
+    t.tm_mday  = stime[2];
+    t.tm_hour  = stime[3];
+    t.tm_min   = stime[4];
+    t.tm_sec   = stime[5];
+    t.tm_isdst = -1;
+
+    const std::time_t secs = std::mktime(&t);
+    return secs < 0 ? 0 : static_cast<quint32>(secs);
 }
 
 // ---------------------------------------------------------------------------

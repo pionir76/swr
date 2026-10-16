@@ -560,7 +560,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     for (const Util::LogEntry &e : alertEntries) {
         QJsonObject obj;
         obj["id"]        = e.id;
-        obj["timestamp"] = e.timestamp.toString(Qt::ISODate);
+        obj["timestamp"] = e.timestamp;
         obj["level"]     = Util::logLevelToString(e.level);
         obj["message"]   = e.message;
         alertArr.append(obj);
@@ -609,7 +609,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     for (const Util::LogEntry &e : logEntries) {
         QJsonObject obj;
         obj["id"]        = e.id;
-        obj["timestamp"] = e.timestamp.toString(Qt::ISODate);
+        obj["timestamp"] = e.timestamp;
         obj["level"]     = Util::logLevelToString(e.level);
         obj["message"]   = e.message;
         logArr.append(obj);
@@ -1356,7 +1356,7 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
     for (const Util::LogEntry &entry : entries) {
         QJsonObject obj;
         obj["id"]        = entry.id;
-        obj["timestamp"] = entry.timestamp.toString(Qt::ISODate);
+        obj["timestamp"] = entry.timestamp;
         obj["level"]     = Util::logLevelToString(entry.level);
         obj["message"]   = entry.message;
         arr.append(obj);

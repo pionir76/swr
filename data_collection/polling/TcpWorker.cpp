@@ -21,14 +21,12 @@ TcpWorker::TcpWorker(Model::DeviceInfo device,
 
 void TcpWorker::stop()
 {
-    m_running = false;
+    requestStop();
     wait();
 }
 
 void TcpWorker::run()
 {
-    m_running = true;
-
     auto client = Comm::createDeviceClient(m_device.connection);
     Processor::DataCollector collector(m_device, m_deviceList, std::move(client));
     int    consecutiveErrors = 0;
@@ -115,7 +113,9 @@ void TcpWorker::run()
         const int sleepMs = isAuto
                             ? qMax(static_cast<int>(durationMs * 1.3), 500)
                             : m_device.polling.intervalMs;
-        msleep(sleepMs);
+        // sleep in short slices so stop() does not wait for the whole interval
+        for (int slept = 0; m_running && slept < sleepMs; slept += 50)
+            msleep(qMin(50, sleepMs - slept));
     }
 }
 
