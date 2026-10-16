@@ -124,24 +124,6 @@ bool DeviceList::isEnabled(int deviceId) const
     return it == m_devices.constEnd() || it->enabled;
 }
 
-QSet<int> DeviceList::disabledDeviceIds() const
-{
-    QMutexLocker locker(&m_mutex);
-    QSet<int> ids;
-    for (auto it = m_devices.cbegin(); it != m_devices.cend(); ++it)
-        if (!it->enabled)
-            ids.insert(it.key());
-    return ids;
-}
-
-void DeviceList::setEnabled(int deviceId, bool enabled)
-{
-    QMutexLocker locker(&m_mutex);
-    auto it = m_devices.find(deviceId);
-    if (it != m_devices.end())
-        it->enabled = enabled;
-}
-
 void DeviceList::enqueueWrite(int deviceId, Model::WriteRequest req)
 {
     QMutexLocker locker(&m_mutex);

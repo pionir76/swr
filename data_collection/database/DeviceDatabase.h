@@ -28,7 +28,6 @@ public:
     bool insertDevice(const Model::DeviceInfo &device, QString &error);
     bool updateDevice(const Model::DeviceInfo &device, QString &error);
     bool deleteDevice(int deviceId, QString &error);
-    bool setDevicesEnabled(const QList<QPair<int, bool>> &changes, QString &error);  // all or nothing
 
     // Register
     QList<Model::RegisterConfig> loadRegisters(int deviceId, QString &error) const;

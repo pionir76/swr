@@ -44,11 +44,8 @@ struct RegisterState {
     int                 pollingIntervalMs = 1000;
 };
 
-inline DataQuality computeQuality(const RegisterState &r, bool deviceDisabled, const QDateTime &nowUtc)
+inline DataQuality computeQuality(const RegisterState &r, const QDateTime &nowUtc)
 {
-    if (deviceDisabled)
-        return DataQuality::Disabled;
-
     if (r.lastUpdated.isValid() && r.pollingIntervalMs > 0) {
         const qint64 elapsedMs = r.lastUpdated.msecsTo(nowUtc);
         if (elapsedMs < r.pollingIntervalMs * 3 / 2)

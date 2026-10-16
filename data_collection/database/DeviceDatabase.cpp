@@ -573,44 +573,6 @@ bool DeviceDatabase::updateDevice(const Model::DeviceInfo &device, QString &erro
     return true;
 }
 
-bool DeviceDatabase::setDevicesEnabled(const QList<QPair<int, bool>> &changes, QString &error)
-{
-    if (!isOpen()) {
-        error = QStringLiteral("Database is not open.");
-        return false;
-    }
-
-    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
-    if (!db.transaction()) {
-        error = db.lastError().text();
-        return false;
-    }
-
-    QSqlQuery q(db);
-    for (const auto &c : changes) {
-        q.prepare(QStringLiteral("UPDATE devices SET enabled=? WHERE id=?"));
-        q.addBindValue(c.second ? 1 : 0);
-        q.addBindValue(c.first);
-        if (!q.exec()) {
-            error = q.lastError().text();
-            db.rollback();
-            return false;
-        }
-        if (q.numRowsAffected() == 0) {
-            error = QStringLiteral("Device not found: %1").arg(c.first);
-            db.rollback();
-            return false;
-        }
-    }
-
-    if (!db.commit()) {
-        error = db.lastError().text();
-        db.rollback();
-        return false;
-    }
-    return true;
-}
-
 bool DeviceDatabase::deleteDevice(int deviceId, QString &error)
 {
     if (!isOpen()) {

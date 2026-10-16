@@ -117,9 +117,6 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handleGetDeviceStatus(req); });
     m_server.route("/api/devices", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostDevice(req); });
-    // must be registered before /api/devices/<arg>
-    m_server.route("/api/devices/enabled", QHttpServerRequest::Method::Put,
-                   [this](const QHttpServerRequest &req) { return handlePutDevicesEnabled(req); });
     m_server.route("/api/devices/<arg>", QHttpServerRequest::Method::Put,
                    [this](const QString &id, const QHttpServerRequest &req) { return handlePutDevice(req, id); });
     m_server.route("/api/devices/<arg>", QHttpServerRequest::Method::Delete,
@@ -499,28 +496,6 @@ QHttpServerResponse ApiServer::handleSession(const QHttpServerRequest &request)
 // ---------------------------------------------------------------------------
 // Polling Control Handler
 // ---------------------------------------------------------------------------
-static void logDeviceEnabledChange(const Model::DeviceInfo &d, const QString &by)
-{
-    Util::Logger::info(QStringLiteral("Device %1: %2 (id=%3) by %4")
-                           .arg(d.enabled ? QStringLiteral("enabled") : QStringLiteral("disabled"),
-                                d.name).arg(d.id).arg(by));
-}
-
-// ---------------------------------------------------------------------------
-// "disabled" is derived from the device setting, not stored in the status.
-// ---------------------------------------------------------------------------
-static QString deviceStateString(const Model::DeviceInfo &d)
-{
-    if (!d.enabled)
-        return QStringLiteral("disabled");
-
-    switch (d.status.state) {
-    case Model::DeviceInfo::Status::State::Ok:    return QStringLiteral("ok");
-    case Model::DeviceInfo::Status::State::Error: return QStringLiteral("error");
-    default:                                      return QStringLiteral("unknown");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Dashboard — unified snapshot for the dashboard page
 // ---------------------------------------------------------------------------
@@ -535,19 +510,27 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     // ── 1. Devices + KPI ────────────────────────────────────────────────────
     const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
-    int okCount       = 0;
-    int errorCount    = 0;
-    int unknownCount  = 0;
-    int disabledCount = 0;
-    QSet<int> disabledIds;
+    int okCount      = 0;
+    int errorCount   = 0;
+    int unknownCount = 0;
 
     QJsonArray devArr;
     for (const Model::DeviceInfo &d : devices) {
-        const QString stateStr = deviceStateString(d);
-        if      (stateStr == QLatin1String("ok"))       ++okCount;
-        else if (stateStr == QLatin1String("error"))    ++errorCount;
-        else if (stateStr == QLatin1String("disabled")) { ++disabledCount; disabledIds.insert(d.id); }
-        else                                            ++unknownCount;
+        QString stateStr;
+        switch (d.status.state) {
+        case Model::DeviceInfo::Status::State::Ok:
+            stateStr = QStringLiteral("ok");
+            ++okCount;
+            break;
+        case Model::DeviceInfo::Status::State::Error:
+            stateStr = QStringLiteral("error");
+            ++errorCount;
+            break;
+        default:
+            stateStr = QStringLiteral("unknown");
+            ++unknownCount;
+            break;
+        }
 
         QJsonObject obj;
         obj["id"]               = d.id;
@@ -555,7 +538,6 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         obj["deviceCode"]       = d.deviceCode;
         obj["connType"]         = Model::connectionTypeToString(d.connection.type);
         obj["protocol"]         = Model::protocolToString(d.connection.protocol);
-        obj["enabled"]          = d.enabled;
         obj["state"]            = stateStr;
         obj["lastPollDurationMs"] = d.status.lastPollDurationMs;
         obj["consecutiveErrors"]  = d.status.consecutiveErrors;
@@ -594,8 +576,7 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         if (realtimeCount >= kDashRealtimeLimit)
             break;
 
-        const Model::DataQuality quality =
-            Model::computeQuality(r, disabledIds.contains(r.config.deviceId), now);
+        const Model::DataQuality quality = Model::computeQuality(r, now);
 
         QJsonObject obj;
         obj["id"]           = r.config.unifiedAddress;
@@ -638,9 +619,8 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
     QJsonObject kpi;
     kpi["totalDevices"]   = devices.size();
     kpi["okDevices"]      = okCount;
-    kpi["errorDevices"]    = errorCount;
-    kpi["unknownDevices"]  = unknownCount;
-    kpi["disabledDevices"] = disabledCount;
+    kpi["errorDevices"]   = errorCount;
+    kpi["unknownDevices"] = unknownCount;
 
     QJsonObject polling;
     polling["running"] = m_pollingManager->isRunning();
@@ -739,13 +719,19 @@ QHttpServerResponse ApiServer::handleGetDeviceStatus(const QHttpServerRequest &r
 
     QJsonArray arr;
     for (const Model::DeviceInfo &d : devices) {
+        QString stateStr;
+        switch (d.status.state) {
+        case Model::DeviceInfo::Status::State::Ok:    stateStr = QStringLiteral("ok");      break;
+        case Model::DeviceInfo::Status::State::Error: stateStr = QStringLiteral("error");   break;
+        default:                                      stateStr = QStringLiteral("unknown"); break;
+        }
+
         QJsonObject obj;
         obj["deviceId"]             = d.id;
         obj["deviceCode"]           = d.deviceCode;
         obj["displayName"]          = d.displayName;
         obj["pollMode"]             = Model::pollModeToString(d.polling.pollMode);
-        obj["enabled"]              = d.enabled;
-        obj["state"]                = deviceStateString(d);
+        obj["state"]                = stateStr;
         obj["lastPollTimestamp"]    = d.status.lastPollTimestamp;
         obj["lastPollDurationMs"]   = d.status.lastPollDurationMs;
         obj["effectiveIntervalMs"]  = d.status.effectiveIntervalMs;
@@ -838,12 +824,10 @@ QHttpServerResponse ApiServer::handlePostDevice(const QHttpServerRequest &reques
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Device added: %1%2")
-                           .arg(device.name, device.enabled ? QString() : QStringLiteral(" (disabled)")));
+    Util::Logger::info(QStringLiteral("Device added: %1").arg(device.name));
     QJsonObject resp;
     resp["name"]     = device.name;
     resp["pollMode"] = Model::pollModeToString(device.polling.pollMode);
-    resp["enabled"]  = device.enabled;
     return QHttpServerResponse(resp, QHttpServerResponse::StatusCode::Created);
 }
 
@@ -886,7 +870,6 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     if (body.contains("retryCount"))  device.polling.retryCount   = body.value("retryCount").toInt();
     if (body.contains("pollMode"))    device.polling.pollMode     = Model::pollModeFromString(body.value("pollMode").toString());
 
-    const bool wasEnabled = device.enabled;
     if (body.contains("enabled"))     device.enabled              = body.value("enabled").toBool(device.enabled);
 
     if (body.contains("byteOrder")) {
@@ -926,94 +909,15 @@ QHttpServerResponse ApiServer::handlePutDevice(const QHttpServerRequest &request
     }
 
     Util::Logger::info(QStringLiteral("Device updated: id=%1").arg(deviceId));
-    if (device.enabled != wasEnabled)
-        logDeviceEnabledChange(device, sessionUsername(request));
-
     QJsonObject resp;
     resp["ok"]       = true;
     resp["pollMode"] = Model::pollModeToString(device.polling.pollMode);
-    resp["enabled"]  = device.enabled;
     if (device.polling.pollMode == Model::PollingConfig::PollMode::Manual
         && device.status.lastPollDurationMs > 0
         && device.polling.intervalMs < static_cast<int>(device.status.lastPollDurationMs * 1.2)) {
         resp["warning"] = QStringLiteral("설정 주기(%1ms)가 실측 소요시간(%2ms)보다 짧습니다")
                           .arg(device.polling.intervalMs).arg(device.status.lastPollDurationMs);
     }
-    return QHttpServerResponse(resp);
-}
-
-// ---------------------------------------------------------------------------
-// PUT /api/devices/enabled — batch enable/disable, all or nothing
-// ---------------------------------------------------------------------------
-QHttpServerResponse ApiServer::handlePutDevicesEnabled(const QHttpServerRequest &request)
-{
-    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
-
-    QHttpServerResponse conflict(QHttpServerResponse::StatusCode::Ok);
-    if (rejectIfPolling(conflict))
-        return conflict;
-
-    auto badRequest = [](const QString &message) {
-        QJsonObject e;
-        e[QLatin1String("error")] = message;
-        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
-    };
-
-    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    const QJsonValue changesVal = doc.object().value(QLatin1String("changes"));
-    if (!doc.isObject() || !changesVal.isArray())
-        return badRequest(QStringLiteral("'changes' must be an array of { id, enabled }"));
-
-    QList<QPair<int, bool>> changes;
-    QList<Model::DeviceInfo> targets;
-
-    for (const QJsonValue &v : changesVal.toArray()) {
-        const QJsonObject obj = v.toObject();
-        if (!obj.value(QLatin1String("id")).isDouble() || !obj.value(QLatin1String("enabled")).isBool())
-            return badRequest(QStringLiteral("each change needs a numeric 'id' and a boolean 'enabled'"));
-
-        const int  id      = obj.value(QLatin1String("id")).toInt();
-        const bool enabled = obj.value(QLatin1String("enabled")).toBool();
-
-        Model::DeviceInfo device;
-        try {
-            device = m_deviceList->get(id);
-        } catch (const std::out_of_range &) {
-            QJsonObject e;
-            e[QLatin1String("error")] = QStringLiteral("Device not found");
-            e[QLatin1String("id")]    = id;
-            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
-        }
-
-        changes.append({ id, enabled });
-        device.enabled = enabled;
-        targets.append(device);
-    }
-
-    QString dbErr;
-    if (!m_db->setDevicesEnabled(changes, dbErr)) {
-        QJsonObject e;
-        e[QLatin1String("error")] = dbErr;
-        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
-    }
-
-    const QString by = sessionUsername(request);
-    QJsonArray result;
-    for (const Model::DeviceInfo &d : targets) {
-        if (m_deviceList->isEnabled(d.id) != d.enabled) {
-            m_deviceList->setEnabled(d.id, d.enabled);
-            logDeviceEnabledChange(d, by);
-        }
-
-        QJsonObject obj;
-        obj[QLatin1String("id")]      = d.id;
-        obj[QLatin1String("enabled")] = d.enabled;
-        result.append(obj);
-    }
-
-    QJsonObject resp;
-    resp[QLatin1String("ok")]      = true;
-    resp[QLatin1String("devices")] = result;
     return QHttpServerResponse(resp);
 }
 
@@ -1365,12 +1269,10 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
     if (auto err = requireAuth(request)) return std::move(*err);
 
     const QList<Model::RegisterState> regs = m_registerTable->states();
-    const QSet<int> disabledIds = m_deviceList->disabledDeviceIds();
     const QDateTime now = QDateTime::currentDateTimeUtc();
     QJsonArray arr;
     for (const Model::RegisterState &r : regs) {
-        const Model::DataQuality quality =
-            Model::computeQuality(r, disabledIds.contains(r.config.deviceId), now);
+        const Model::DataQuality quality = Model::computeQuality(r, now);
 
         QJsonObject obj;
 
@@ -3167,7 +3069,6 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
     QString dbErr;
     const QList<Model::HmiTag> allTags = m_db->loadHmiTags(dbErr);
 
-    const QSet<int> disabledIds = m_deviceList->disabledDeviceIds();
     const QDateTime now = QDateTime::currentDateTimeUtc();
     QJsonObject values;
 
@@ -3180,14 +3081,17 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
         if (!regFound) continue;
 
         const DataCollection::Model::RegisterState state = m_registerTable->state(reg.unifiedAddress);
-        const bool disabled = disabledIds.contains(reg.deviceId);
-        const DataCollection::Model::DataQuality q = Model::computeQuality(state, disabled, now);
+        const DataCollection::Model::DataQuality q = m_deviceList->isEnabled(reg.deviceId)
+                                                     ? Model::computeQuality(state, now)
+                                                     : Model::DataQuality::Disabled;
 
         // Effective decimals
         int decimals = t.hasDecimals ? t.decimals : decimalsFromScale(reg.scale);
 
+        // A register with no entry yet comes back default-constructed (isValid = true, value 0),
+        // so also require that a value was actually received.
         QJsonObject val;
-        val[QLatin1String("v")] = state.isValid
+        val[QLatin1String("v")] = (state.isValid && state.lastUpdated.isValid())
                                   ? QJsonValue(state.scaledValue)
                                   : QJsonValue(QJsonValue::Null);
         val[QLatin1String("q")]        = DataCollection::Model::dataQualityToString(q);

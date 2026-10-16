@@ -1,6 +1,6 @@
 # SmartRoute REST API 명세
 
-> 최종 수정: 2026-10-15 (장비 활성/비활성 추가, 상위 Modbus 쓰기 동작 명시, lastPollTimestamp 형식 정정)  
+> 최종 수정: 2026-10-16 (장비 enabled 추가, lastPollTimestamp 형식 정정)  
 > Base URL: `http://<device-ip>:8080`  
 > 응답 형식: `application/json` (바이너리 응답 제외)
 
@@ -95,8 +95,7 @@
     "totalDevices": 3,
     "okDevices": 2,
     "errorDevices": 1,
-    "unknownDevices": 0,
-    "disabledDevices": 0
+    "unknownDevices": 0
   },
   "devices": [
     {
@@ -105,7 +104,6 @@
       "deviceCode": "DEV01",
       "connType": "serial",
       "protocol": "modbus_rtu",
-      "enabled": true,
       "state": "ok",
       "lastPollDurationMs": 45,
       "consecutiveErrors": 0,
@@ -122,8 +120,7 @@
 }
 ```
 
-> `state`: `"ok"` | `"error"` | `"unknown"` | `"disabled"`  
-> `errorDevices`, `unknownDevices`에는 비활성 장비가 포함되지 않음 (`disabledDevices`로 따로 집계)
+> `state`: `"ok"` | `"error"` | `"unknown"`
 
 ---
 
@@ -149,11 +146,7 @@
 
 **에러** 409: 이미 실행 중
 
-> 시작 시 동작
-> - 비활성 장비(`enabled: false`)는 폴링 대상에서 제외
-> - 활성 장비: 레지스터 값과 장비 상태를 초기화한 뒤 폴링 (`state: "unknown"`, `consecutiveErrors: 0`에서 시작)
-> - 비활성 장비: 마지막 값과 장비 상태(`lastPollTimestamp` 등)를 그대로 유지
-> - 모든 레지스터가 실시간 목록에 항상 포함됨 (첫 응답 전에는 `isValid: false`)
+> `enabled: false`인 장비는 폴링 대상에서 제외됩니다. 시작 시 모든 레지스터 값이 초기화되므로 비활성 장비의 레지스터는 실시간 목록에 나오지 않습니다.
 
 ---
 
@@ -201,7 +194,7 @@
 > `protocol`: `"modbus_rtu"` | `"modbus_tcp"` | `"modbus_ascii"` | `"pclink"` | `"pclink_sum"`  
 > `byteOrder`: `"big"` | `"little"` | `"default"`  
 > `pollMode`: `"auto"` | `"manual"` (기본값 `"auto"`)  
-> `enabled`: `false`이면 비활성 장비. 영구 저장되며 백업·복원에 포함. 다음 폴링 시작부터 적용
+> `enabled`: `false`이면 통신하지 않는 장비. 다음 폴링 시작부터 적용. 영구 저장되며 백업·복원에 포함
 
 ---
 
@@ -217,7 +210,6 @@
       "deviceCode": "DEV01",
       "displayName": "PLC 1번",
       "pollMode": "auto",
-      "enabled": true,
       "state": "ok",
       "lastPollTimestamp": 1792051708698,
       "lastPollDurationMs": 45,
@@ -229,8 +221,8 @@
 }
 ```
 
-> `state`: `"ok"` | `"error"` | `"unknown"` | `"disabled"` (`enabled: false`이면 항상 `"disabled"`)  
-> `lastPollTimestamp`: 마지막 폴링 시작 시각, **Unix epoch 밀리초(정수)**. 폴링 이력이 없으면 `0`. 비활성 장비는 비활성화 직전 값을 유지
+> `lastPollTimestamp`: 마지막 폴링 시작 시각, Unix epoch 밀리초(정수). 폴링 이력이 없으면 `0`  
+> 비활성 장비는 폴링하지 않으므로 상태가 갱신되지 않음. 비활성 여부는 `GET /api/devices`의 `enabled`로 판단
 
 ---
 
@@ -264,7 +256,7 @@
 
 **Response 201**
 ```json
-{ "name": "PLC-1", "pollMode": "auto", "enabled": true }
+{ "name": "PLC-1", "pollMode": "auto" }
 ```
 
 ---
@@ -284,40 +276,15 @@
 
 **Response 200**
 ```json
-{ "ok": true, "pollMode": "manual", "enabled": true }
+{ "ok": true, "pollMode": "manual" }
 ```
+`enabled`를 보내면 통신 사용/사용 안 함 전환 (다음 폴링 시작부터 적용)
 `pollMode:"manual"` 설정 시 비현실적인 `intervalMs`(실측 소요시간보다 짧음)를 넣으면 저장은 허용하되 `"warning"` 필드 포함:
 ```json
-{ "ok": true, "pollMode": "manual", "enabled": true, "warning": "설정 주기(500ms)가 실측 소요시간(800ms)보다 짧습니다" }
+{ "ok": true, "pollMode": "manual", "warning": "설정 주기(500ms)가 실측 소요시간(800ms)보다 짧습니다" }
 ```
-
-> `enabled`를 보내면 활성/비활성 전환. 생략하면 현재 값 유지. 상태가 바뀌면 INFO 로그 기록 (`Device disabled: PLC-1 (id=1) by admin`)
 
 **에러** 404: 장비 없음
-
----
-
-### PUT /api/devices/enabled
-권한: `ManagerOrAbove` | 폴링 중 409
-
-여러 장비의 활성/비활성을 한 번에 전환합니다. 전부 적용하거나 전부 적용하지 않습니다.
-
-**Request Body**
-```json
-{ "changes": [ { "id": 1, "enabled": true }, { "id": 2, "enabled": false } ] }
-```
-
-**Response 200**
-```json
-{ "ok": true, "devices": [ { "id": 1, "enabled": true }, { "id": 2, "enabled": false } ] }
-```
-
-> 이미 같은 상태인 장비가 섞여 있어도 오류가 아님. 실제로 상태가 바뀐 장비만 INFO 로그 기록  
-> 적용은 다음 폴링 시작부터. 일반적인 순서: `POST /api/polling/stop` → `PUT /api/devices/enabled` → `POST /api/polling/start`
-
-**에러** 400: 형식 오류 (`id`가 숫자가 아니거나 `enabled`가 boolean이 아님)  
-**에러** 404: 없는 장비 id 포함 `{ "error": "Device not found", "id": 999 }` — 아무것도 바뀌지 않음  
-**에러** 409: 폴링 중
 
 ---
 
@@ -493,9 +460,7 @@
 }
 ```
 
-> `quality`: `"good"` | `"normal"` | `"bad"` | `"disabled"`  
-> 비활성 장비의 레지스터는 경과 시간과 무관하게 `"disabled"`. 값(`scaledValue`, `rawWord`)과 `lastUpdated`는 비활성화 직전 값을 유지  
-> 폴링을 시작하면 모든 레지스터가 목록에 포함됨. 아직 값을 받지 못한 레지스터(첫 응답 전, 또는 비활성 상태로 재부팅한 경우)는 `isValid: false`, `rawWord: 0`, `lastUpdated: ""`
+> `quality`: `"good"` | `"normal"` | `"bad"`
 
 ---
 
@@ -904,9 +869,10 @@
 ```
 
 **상위 Modbus 서버 동작** (Holding Register 영역, 주소 = 레지스터 `unifiedAddress`)
-- 읽기(FC03): 레지스터의 현재 raw 값. 비활성 장비는 비활성화 직전 값 (받은 값이 없으면 0)
+- 읽기(FC03): 레지스터의 현재 raw 값
 - 쓰기(FC06/FC16): 쓴 값을 해당 장비로 전달. 같은 값을 반복해서 써도 매번 전달
 - 읽기 전용 레지스터 또는 비활성 장비의 레지스터에 쓰기: Modbus 예외 **0x04**(Server Device Failure)로 거부. 다중 쓰기(FC16)에 하나라도 포함되면 요청 전체를 거부하며 아무 값도 쓰지 않음
+- 비활성 장비의 레지스터 읽기: 값이 없으므로 0
 - 레지스터가 매핑되지 않은 주소에 쓰기: 무시(정상 응답)
 
 ---
@@ -1390,11 +1356,9 @@ Content-Type: `application/octet-stream`
 | `"good"` | 마지막 폴링 경과 < 1.5× interval |
 | `"normal"` | 1.5× ~ 3× interval (응답 지연) |
 | `"bad"` | 3× 초과 또는 응답 없음 |
-| `"disabled"` | 소스 레지스터의 장비가 비활성 |
+| `"disabled"` | 소스 레지스터의 장비가 비활성 (`v`는 `null`) |
 
-`v`는 `bad` 상태이거나 아직 값이 없으면 `null`  
-`disabled`이면 `v`는 비활성화 직전 값을 유지. 비활성 상태로 재부팅해서 받은 값이 없으면 `null`  
-`access`는 장비 비활성 여부와 무관하게 원래 값
+`v`는 `bad` 상태이거나 아직 값이 없으면 `null`
 
 ### POST /api/hmi/write
 권한: `ManagerOrAbove`

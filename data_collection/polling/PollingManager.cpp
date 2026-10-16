@@ -23,26 +23,16 @@ bool PollingManager::start(QString& error)
         return false;
     }
 
-    const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
+    m_registerTable->clear();
 
-    m_registerTable->prepareForPolling(devices);
+    const QList<Model::DeviceInfo> devices = m_deviceList->getAll();
 
     QList<Model::DeviceInfo> serialDevices;
     QList<Model::DeviceInfo> tcpDevices;
-    int disabledCount = 0;
 
     for (const Model::DeviceInfo &d : devices) {
-        //-----------------------------------------------------------//
-        // Disabled devices get no worker. Their last status and values
-        // are kept; writes queued before disabling are discarded.
-        //-----------------------------------------------------------//
-        if (!d.enabled) {
-            m_deviceList->takeWrites(d.id);
-            ++disabledCount;
+        if (!d.enabled)
             continue;
-        }
-
-        m_deviceList->updateStatus(d.id, Model::DeviceInfo::Status{});
 
         if (d.connection.type == Model::DeviceConnection::ConnectionType::Serial)
             serialDevices.append(d);
@@ -83,8 +73,7 @@ bool PollingManager::start(QString& error)
         
     m_running = true;
 
-    Util::Logger::info(QStringLiteral("Polling started. Total devices: %1 (disabled: %2)")
-                           .arg(devices.size()).arg(disabledCount));
+    Util::Logger::info(QStringLiteral("Polling started. Total devices: %1").arg(devices.size()));
     return true;
 }
 

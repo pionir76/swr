@@ -3,7 +3,6 @@
 #include <QHash>
 #include <QList>
 #include <QMutex>
-#include <QSet>
 
 #include "../model/DeviceModels.h"
 
@@ -24,9 +23,7 @@ public:
     Model::RegisterConfig findByRegisterId(int id, bool &found) const;
     Model::RegisterConfig findByUnifiedAddress(int unifiedAddress, bool &found) const;
 
-    bool       isEnabled(int deviceId) const;   // unknown id counts as enabled
-    QSet<int>  disabledDeviceIds() const;
-    void       setEnabled(int deviceId, bool enabled);
+    bool isEnabled(int deviceId) const;   // unknown id counts as enabled
 
     void enqueueWrite(int deviceId, Model::WriteRequest req);
     QList<Model::WriteRequest> takeWrites(int deviceId);
