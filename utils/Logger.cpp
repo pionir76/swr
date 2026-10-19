@@ -77,6 +77,10 @@ void Logger::run()
         if (create.exec(QStringLiteral("SELECT COUNT(*) FROM logs")) && create.next())
             m_rowCount = create.value(0).toLongLong();
 
+        // `create` lives as long as this thread; without finish() the unfinished SELECT
+        // pins a read snapshot and WAL checkpoints can never complete.
+        create.finish();
+
         m_running = true;
 
         while (m_running) {
