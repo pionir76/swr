@@ -1,6 +1,6 @@
 # SmartRoute REST API 명세
 
-> 최종 수정: 2026-10-16 (장비 enabled 추가, lastPollTimestamp 형식 정정)  
+> 최종 수정: 2026-10-19 (HMI 태그 source에 장비·레지스터 정보 추가)  
 > Base URL: `http://<device-ip>:8080`  
 > 응답 형식: `application/json` (바이너리 응답 제외)
 
@@ -1264,7 +1264,16 @@ Content-Type: `application/octet-stream`
 {
   "id": "TK1_LEVEL",
   "name": "1번 탱크 수위",
-  "source": { "registerId": 123 },
+  "source": {
+    "registerId": 123,
+    "deviceId": 3,
+    "deviceCode": "DEV03",
+    "deviceDisplayName": "1번 탱크 제어기",
+    "registerTagName": "LEVEL",
+    "registerDisplayName": "탱크 수위",
+    "localAddress": 100,
+    "unifiedAddress": 12
+  },
   "unit": "%",
   "min": 0.0,
   "max": 100.0,
@@ -1275,6 +1284,20 @@ Content-Type: `application/octet-stream`
 }
 ```
 
+- `source.registerId`만 저장되는 값. 나머지 `source` 필드는 **응답 전용**으로, 응답할 때마다 현재 장비·레지스터에서 채움(장비·레지스터 이름을 바꾸면 바로 반영)
+
+| `source` 필드 | 출처 |
+|---|---|
+| `deviceId` | 레지스터가 속한 장비 id |
+| `deviceCode` | 장비 `deviceCode` |
+| `deviceDisplayName` | 장비 `displayName` |
+| `registerTagName` | 레지스터 `tagName` |
+| `registerDisplayName` | 레지스터 `displayName` |
+| `localAddress` | 레지스터 `localAddress` (장비 안 주소) |
+| `unifiedAddress` | 레지스터 `unifiedAddress` |
+
+- 소스 레지스터를 찾을 수 없으면 `registerId` 외의 `source` 필드는 모두 `null` (필드는 항상 포함)
+- 소스 레지스터를 삭제하면 그 HMI 태그도 **함께 삭제**됨 (장비 삭제 시 그 장비의 태그도 모두 삭제)
 - `unit / min / max / decimals / access` 생략(null) 시 소스 레지스터 값에서 상속
 - `decimals` 생략 시 `scale`에서 자동 추론 (`scale=0.1 → 1`, `scale=0.01 → 2`, …)
 - `access`: `"r"` | `"rw"` — 레지스터 `readOnly` 상속 또는 오버라이드
@@ -1304,7 +1327,7 @@ Content-Type: `application/octet-stream`
   "access": "r"
 }
 ```
-`id / name / source.registerId` 필수, 나머지 선택
+`id / name / source.registerId` 필수, 나머지 선택. `source`의 응답 전용 필드가 들어와도 무시
 
 **응답** 201: 생성된 HmiTag 객체  
 **에러** 400: 유효하지 않은 id 형식 / registerId 없음 / access 값 오류  

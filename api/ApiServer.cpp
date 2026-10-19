@@ -2851,13 +2851,37 @@ static int decimalsFromScale(double scale)
     return d;
 }
 
-static QJsonObject hmiTagToJson(const Model::HmiTag &t)
+static QJsonObject hmiTagToJson(const Model::HmiTag &t, const Store::DeviceList &devices)
 {
     QJsonObject o;
     o[QLatin1String("id")]   = t.id;
     o[QLatin1String("name")] = t.name;
+
+    //-----------------------------------------------------------//
+    // Source details are looked up on every response, not stored,
+    // so renaming a device or register shows up immediately.
+    //-----------------------------------------------------------//
+    bool regFound = false;
+    const Model::RegisterConfig reg = devices.findByRegisterId(t.registerId, regFound);
+    Model::DeviceInfo dev;
+    bool found = false;
+    if (regFound) {
+        try {
+            dev   = devices.get(reg.deviceId);
+            found = true;
+        } catch (const std::out_of_range &) {}
+    }
+    auto orNull = [found](const QJsonValue &v) { return found ? v : QJsonValue(); };
+
     QJsonObject src;
-    src[QLatin1String("registerId")] = t.registerId;
+    src[QLatin1String("registerId")]          = t.registerId;
+    src[QLatin1String("deviceId")]            = orNull(reg.deviceId);
+    src[QLatin1String("deviceCode")]          = orNull(dev.deviceCode);
+    src[QLatin1String("deviceDisplayName")]   = orNull(dev.displayName);
+    src[QLatin1String("registerTagName")]     = orNull(reg.tagName);
+    src[QLatin1String("registerDisplayName")] = orNull(reg.displayName);
+    src[QLatin1String("localAddress")]        = orNull(reg.localAddress);
+    src[QLatin1String("unifiedAddress")]      = orNull(reg.unifiedAddress);
     o[QLatin1String("source")] = src;
     o[QLatin1String("unit")]     = t.unit.isEmpty()    ? QJsonValue()       : t.unit;
     o[QLatin1String("min")]      = t.hasMin            ? QJsonValue(t.minValue) : QJsonValue();
@@ -2917,7 +2941,7 @@ QHttpServerResponse ApiServer::handleGetHmiTags(const QHttpServerRequest &reques
     }
     QJsonArray arr;
     for (const Model::HmiTag &t : tags)
-        arr.append(hmiTagToJson(t));
+        arr.append(hmiTagToJson(t, *m_deviceList));
     QJsonObject resp;
     resp[QLatin1String("tags")] = arr;
     return QHttpServerResponse(resp);
@@ -2969,7 +2993,7 @@ QHttpServerResponse ApiServer::handlePostHmiTag(const QHttpServerRequest &reques
 
     bool found = false;
     const Model::HmiTag created = m_db->loadHmiTag(id, found, dbErr);
-    return QHttpServerResponse(hmiTagToJson(created), QHttpServerResponse::StatusCode::Created);
+    return QHttpServerResponse(hmiTagToJson(created, *m_deviceList), QHttpServerResponse::StatusCode::Created);
 }
 
 // ---------------------------------------------------------------------------
@@ -2986,7 +3010,7 @@ QHttpServerResponse ApiServer::handleGetHmiTag(const QHttpServerRequest &request
         QJsonObject e; e[QLatin1String("error")] = QStringLiteral("HMI tag not found: %1").arg(id);
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::NotFound);
     }
-    return QHttpServerResponse(hmiTagToJson(tag));
+    return QHttpServerResponse(hmiTagToJson(tag, *m_deviceList));
 }
 
 // ---------------------------------------------------------------------------
@@ -3031,7 +3055,7 @@ QHttpServerResponse ApiServer::handlePutHmiTag(const QHttpServerRequest &request
 
     bool ok = false;
     const Model::HmiTag updated = m_db->loadHmiTag(id, ok, dbErr);
-    return QHttpServerResponse(hmiTagToJson(updated));
+    return QHttpServerResponse(hmiTagToJson(updated, *m_deviceList));
 }
 
 // ---------------------------------------------------------------------------
