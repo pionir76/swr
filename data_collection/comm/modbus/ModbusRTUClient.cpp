@@ -1,5 +1,9 @@
 #include "ModbusRTUClient.h"
 
+#include <QElapsedTimer>
+
+static constexpr int kInterFrameGapMs = 5;
+
 namespace DataCollection {
 namespace Comm {
 
@@ -235,27 +239,72 @@ bool ModbusRTUClient::sendRequest(const QByteArray &request,
                                   QByteArray &response,
                                   QString &error)
 {
+    //-----------------------------------------------------------//
+    // Back-to-back frames (sent 0ms after the previous response) were
+    // missed by some slaves, so keep a short silent gap between frames.
+    //-----------------------------------------------------------//
+    m_bus.waitForIdle(kInterFrameGapMs);
     m_bus.clearBuffers();
 
     const qint64 written = m_bus.write(request);
     if (written != request.size() ||
         !m_bus.waitForBytesWritten(m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 1000)) {
+        m_bus.markIdle();
         m_lastError = QStringLiteral("RTU write failed: %1").arg(m_bus.errorString());
         error = m_lastError;
         return false;
     }
 
     if (!m_bus.waitForReadyRead(m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000)) {
+        m_bus.markIdle();
         m_lastError = QStringLiteral("RTU timeout waiting for response");
         error = m_lastError;
         return false;
     }
 
     response = m_bus.readAll();
-    while (m_bus.waitForReadyRead(200)){
+
+    //-----------------------------------------------------------//
+    // The frame length follows from the function code, so stop as soon
+    // as the frame is complete instead of waiting for 200ms of silence:
+    //   exception (FC | 0x80)  : slave, fc, code, crc(2)        = 5
+    //   read  FC 01/02/03/04   : slave, fc, count, data, crc(2) = 5 + count
+    //   write FC 05/06/0F/10   : slave, fc, addr(2), val(2), crc(2) = 8
+    // Unknown function codes keep the old silence-based read.
+    //-----------------------------------------------------------//
+    auto frameLength = [&response]() -> int {
+        if (response.size() < 2)
+            return 2;
+        const quint8 fc = static_cast<quint8>(response.at(1));
+        if (fc & 0x80)
+            return 5;
+        switch (fc) {
+        case 0x01: case 0x02: case 0x03: case 0x04:
+            return response.size() < 3 ? 3 : 5 + static_cast<quint8>(response.at(2));
+        case 0x05: case 0x06: case 0x0F: case 0x10:
+            return 8;
+        default:
+            return -1;
+        }
+    };
+
+    const int timeoutMs = m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000;
+    QElapsedTimer elapsed;
+    elapsed.start();
+
+    for (int expected = frameLength(); expected >= 0 && response.size() < expected; expected = frameLength()) {
+        const int remaining = timeoutMs - static_cast<int>(elapsed.elapsed());
+        if (remaining <= 0 || !m_bus.waitForReadyRead(remaining))
+            break;
         response.append(m_bus.readAll());
     }
 
+    if (frameLength() < 0) {
+        while (m_bus.waitForReadyRead(200))
+            response.append(m_bus.readAll());
+    }
+
+    m_bus.markIdle();
     return true;
 }
 

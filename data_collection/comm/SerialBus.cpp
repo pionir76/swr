@@ -1,5 +1,7 @@
 #include "SerialBus.h"
 
+#include <QThread>
+
 namespace DataCollection {
 namespace Comm {
 
@@ -67,6 +69,20 @@ QByteArray SerialBus::readAll()
 QString SerialBus::errorString() const
 {
     return m_port.errorString();
+}
+
+void SerialBus::markIdle()
+{
+    m_idleSince.start();
+}
+
+void SerialBus::waitForIdle(int minGapMs)
+{
+    if (!m_idleSince.isValid())
+        return;
+    const qint64 quietMs = m_idleSince.elapsed();
+    if (quietMs < minGapMs)
+        QThread::msleep(static_cast<unsigned long>(minGapMs - quietMs));
 }
 
 } // namespace Comm

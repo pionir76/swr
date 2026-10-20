@@ -3,6 +3,7 @@
 #include "../../config/AppConfig.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QSerialPort>
 #include <QString>
 
@@ -24,8 +25,13 @@ public:
     QByteArray readAll();
     QString    errorString() const;
 
+    // Modbus RTU needs a silent interval between frames on the shared bus.
+    void       markIdle();                  // a request/response exchange just ended
+    void       waitForIdle(int minGapMs);   // block until the bus has been quiet for minGapMs
+
 private:
-    QSerialPort m_port;
+    QSerialPort   m_port;
+    QElapsedTimer m_idleSince;
 };
 
 } // namespace Comm

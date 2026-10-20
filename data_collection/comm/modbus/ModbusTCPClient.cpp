@@ -1,5 +1,7 @@
 #include "ModbusTCPClient.h"
 
+#include <QElapsedTimer>
+
 namespace DataCollection {
 namespace Comm {
 
@@ -242,7 +244,25 @@ bool ModbusTCPClient::sendRequest(const QByteArray &request, QByteArray &respons
     }
 
     response = m_socket.readAll();
-    while (m_socket.waitForReadyRead(200)) {
+
+    //-----------------------------------------------------------//
+    // MBAP bytes [4..5] give the number of bytes that follow, so stop as
+    // soon as the frame is complete instead of waiting for silence.
+    //-----------------------------------------------------------//
+    const int timeoutMs = m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000;
+    QElapsedTimer elapsed;
+    elapsed.start();
+
+    auto frameLength = [&response]() -> int {
+        if (response.size() < 6)
+            return 6;
+        return 6 + ((static_cast<quint8>(response.at(4)) << 8) | static_cast<quint8>(response.at(5)));
+    };
+
+    while (response.size() < frameLength()) {
+        const int remaining = timeoutMs - static_cast<int>(elapsed.elapsed());
+        if (remaining <= 0 || !m_socket.waitForReadyRead(remaining))
+            break;
         response.append(m_socket.readAll());
     }
 
