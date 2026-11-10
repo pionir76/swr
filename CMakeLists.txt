@@ -69,6 +69,12 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
   SerialBus
   Sql)
 
+# QZipWriter/QZipReader (backup ZIP) are Qt private API. From Qt 6.10 the
+# private targets live in separate packages; before that they come with Core.
+if(Qt${QT_VERSION_MAJOR}_VERSION VERSION_GREATER_EQUAL 6.10)
+  find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS CorePrivate)
+endif()
+
 add_executable(swr
   main.cpp
 

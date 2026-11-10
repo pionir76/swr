@@ -287,8 +287,10 @@ void ApiServer::setupRoutes()
     m_server.route("/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Options, optionsHandler4);
 
     // 모든 응답에 CORS 헤더 일괄 추가
+    // Start from the existing headers: on Qt 6.11 (unlike 6.8) Content-Type and
+    // Content-Disposition live in the same header list, so a fresh QHttpHeaders drops them.
     m_server.addAfterRequestHandler(this, [](const QHttpServerRequest &, QHttpServerResponse &resp) {
-        QHttpHeaders h;
+        QHttpHeaders h = resp.headers();
         h.append(QLatin1String("Access-Control-Allow-Origin"),  QLatin1String("*"));
         h.append(QLatin1String("Access-Control-Allow-Methods"), QLatin1String("GET, POST, PUT, DELETE, OPTIONS"));
         h.append(QLatin1String("Access-Control-Allow-Headers"), QLatin1String("Content-Type, Authorization"));

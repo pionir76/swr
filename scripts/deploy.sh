@@ -6,15 +6,15 @@
 #
 # 사전 조건:
 #   - 장치가 192.168.0.150 으로 접근 가능한 상태
-#   - SDK: /opt/imx6ull-core-sdk/environment-setup-cortexa7t2hf-neon-poky-linux-gnueabi
+#   - SDK: /opt/imx6ull-core-sdk-wrynose/environment-setup-cortexa7t2hf-neon-poky-linux-gnueabi
 #   - 백업 파일: DB Backup/etc-swr/config.json, DB Backup/var-lib-swr/smartroute.db
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$PROJECT_DIR/build/i_MX6ULL_Qt6_SDK-Release"
-SDK_ENV="/opt/imx6ull-core-sdk/environment-setup-cortexa7t2hf-neon-poky-linux-gnueabi"
+BUILD_DIR="$PROJECT_DIR/build/wrynose-Release"
+SDK_ENV="/opt/imx6ull-core-sdk-wrynose/environment-setup-cortexa7t2hf-neon-poky-linux-gnueabi"
 DEVICE="192.168.0.150"
 DEVICE_USER="root"
 SSH_KEY="$HOME/.ssh/id_ed25519"
@@ -54,6 +54,9 @@ echo "    SSH 키 등록 완료"
 # 2. 빌드
 echo "[2/7] 크로스 컴파일..."
 source "$SDK_ENV"
+if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -3
+fi
 cmake --build "$BUILD_DIR" --parallel "$(nproc)" 2>&1 | tail -3
 echo "    빌드 완료"
 
