@@ -2731,9 +2731,16 @@ QHttpServerResponse ApiServer::handlePutSystemNtp(const QHttpServerRequest &requ
     QProcess proc;
     proc.start(QStringLiteral("timedatectl"),
                QStringList() << QStringLiteral("set-ntp") << arg);
-    proc.waitForFinished(5000);
+    // set-ntp starts/stops ntpd and reloads systemd, which takes ~9s on this board
+    // (systemd 259). Answer only once it is done so the UI state matches the device.
+    if (!proc.waitForFinished(20000)) {
+        proc.kill();
+        proc.waitForFinished(1000);
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("timedatectl set-ntp timed out");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+    }
 
-    if (proc.exitCode() != 0) {
+    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
         QJsonObject e; e[QLatin1String("error")] = QStringLiteral("timedatectl set-ntp failed: ")
                                                    + QString::fromUtf8(proc.readAllStandardError()).trimmed();
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
@@ -2795,7 +2802,13 @@ QHttpServerResponse ApiServer::handlePutSystemTime(const QHttpServerRequest &req
     check.start(QStringLiteral("timedatectl"), QStringList() << QStringLiteral("show"));
     check.waitForFinished(3000);
     const QString checkOut = QString::fromUtf8(check.readAllStandardOutput());
-    if (checkOut.contains(QLatin1String("NTP=yes")) || checkOut.contains(QLatin1String("NTP=on"))) {
+    // Compare whole lines: the output always has "CanNTP=yes", which contains "NTP=yes".
+    bool ntpActive = false;
+    for (const QString &line : checkOut.split(QLatin1Char('\n'))) {
+        if (line.startsWith(QLatin1String("NTP=yes")))
+            ntpActive = true;
+    }
+    if (ntpActive) {
         QJsonObject e; e[QLatin1String("error")] =
             QStringLiteral("NTP is active. Disable NTP before setting manual time.");
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
@@ -2824,8 +2837,15 @@ QHttpServerResponse ApiServer::handlePutSystemTime(const QHttpServerRequest &req
     proc.waitForFinished(5000);
 
     if (proc.exitCode() != 0) {
-        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("timedatectl set-time failed: ")
-                                                   + QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        const QString stdErr = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        // systemd (wrynose and later) refuses a clock earlier than the OS build time.
+        // That is an input problem, not a server failure.
+        if (stdErr.contains(QLatin1String("before build time"))) {
+            QJsonObject e; e[QLatin1String("error")] =
+                QStringLiteral("Time is earlier than the OS build date. Enter a later date and time.");
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("timedatectl set-time failed: ") + stdErr;
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
