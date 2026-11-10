@@ -1227,7 +1227,13 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
         QVariant unit, minValue, maxValue, decimals, access, createdAt, updatedAt;
     };
     QList<TagSnapshot> keptTags;
-    const bool relinkTags = restoreDevices && !restoreHmi;
+    // Backups made before HMI support carry an empty hmi object; treat them as
+    // "no HMI to restore" so the existing tags are kept and re-linked instead.
+    const bool hmiHasData = hmi.contains(QLatin1String("project"))
+                         || hmi.contains(QLatin1String("screens"))
+                         || hmi.contains(QLatin1String("tags"));
+    const bool doRestoreHmi = restoreHmi && hmiHasData;
+    const bool relinkTags = restoreDevices && !doRestoreHmi;
 
     if (relinkTags) {
         if (!q.exec(QStringLiteral(
@@ -1314,6 +1320,38 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             const int newDeviceId = idMap.value(obj[QLatin1String("deviceId")].toInt(), -1);
             if (newDeviceId < 0) continue;
 
+            //-----------------------------------------------------------//
+            // Backups made before 2026-07-10 use "address"/"unifiedRegisterId"
+            // instead of "localAddress"/"unifiedAddress". Without the fallback every
+            // register would be restored at address 0 with no unified address.
+            //-----------------------------------------------------------//
+            const int localAddress = obj.contains(QLatin1String("localAddress"))
+                                     ? obj[QLatin1String("localAddress")].toInt()
+                                     : obj[QLatin1String("address")].toInt();
+            int unifiedAddress = obj.contains(QLatin1String("unifiedAddress"))
+                                 ? obj[QLatin1String("unifiedAddress")].toInt(-1)
+                                 : obj[QLatin1String("unifiedRegisterId")].toInt(-1);
+
+            // Still unassigned: take the next free id from the auto range, like insertRegister().
+            if (unifiedAddress < 0) {
+                QSqlQuery nq(db);
+                nq.prepare(QStringLiteral(
+                    "SELECT COALESCE(MAX(unified_register_id), 0) + 1 "
+                    "FROM registers WHERE unified_register_id >= 0 AND unified_register_id < ?"));
+                nq.addBindValue(Model::kManualUnifiedIdMin);
+                if (!nq.exec() || !nq.next()) {
+                    error = nq.lastError().text();
+                    db.rollback();
+                    return false;
+                }
+                unifiedAddress = nq.value(0).toInt();
+                if (unifiedAddress >= Model::kManualUnifiedIdMin) {
+                    error = QStringLiteral("Auto-assign range exhausted (max %1)").arg(Model::kAutoUnifiedIdMax);
+                    db.rollback();
+                    return false;
+                }
+            }
+
             q.prepare(QStringLiteral(
                 "INSERT INTO registers "
                 "(device_id, name, address, type, read_only, length, unified_register_id, "
@@ -1321,11 +1359,11 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(newDeviceId);
             q.addBindValue(obj[QLatin1String("tagName")].toString());
-            q.addBindValue(obj[QLatin1String("localAddress")].toInt());       // TODO: rename DB column address -> local_address
+            q.addBindValue(localAddress);                                     // TODO: rename DB column address -> local_address
             q.addBindValue(obj[QLatin1String("type")].toString());
             q.addBindValue(obj[QLatin1String("readOnly")].toBool(true) ? 1 : 0);
             q.addBindValue(obj[QLatin1String("length")].toInt(1));
-            q.addBindValue(obj[QLatin1String("unifiedAddress")].toInt(-1));   // TODO: rename DB column unified_register_id -> unified_address
+            q.addBindValue(unifiedAddress);                                   // TODO: rename DB column unified_register_id -> unified_address
             q.addBindValue(obj[QLatin1String("displayName")].toString());
             q.addBindValue(obj[QLatin1String("unit")].toString());
             q.addBindValue(obj[QLatin1String("scale")].toDouble(1.0));
@@ -1444,7 +1482,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     // unifiedAddress, which is globally unique and stable, and we resolve
     // it back to the current register id here.
     //-----------------------------------------------------------//
-    if (restoreHmi) {
+    if (doRestoreHmi) {
         QMap<int, int> unifiedToRegisterId;
         {
             QSqlQuery rq(db);
@@ -1491,14 +1529,14 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 "(id, title, content, revision, sort_order, updated_at, updated_by) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(id);
-            q.addBindValue(obj[QLatin1String("title")].toString());
+            q.addBindValue(obj[QLatin1String("title")].toString(QStringLiteral("")));
             q.addBindValue(QJsonDocument(obj[QLatin1String("content")].toObject())
                                .toJson(QJsonDocument::Compact));
             q.addBindValue(obj[QLatin1String("revision")].toInt(1));
             q.addBindValue(sortOrder++);
             q.addBindValue(obj[QLatin1String("updatedAt")].toString(
                                QDateTime::currentDateTime().toString(Qt::ISODate)));
-            q.addBindValue(obj[QLatin1String("updatedBy")].toString());
+            q.addBindValue(obj[QLatin1String("updatedBy")].toString(QStringLiteral("")));
 
             if (!q.exec()) {
                 error = q.lastError().text();
@@ -1526,7 +1564,8 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
         q.prepare(QStringLiteral(
             "INSERT INTO hmi_project (id, name, start_screen, revision) "
             "VALUES (1, ?, ?, ?)"));
-        q.addBindValue(proj[QLatin1String("name")].toString());
+        // a missing key yields a null QString, which binds as SQL NULL (name is NOT NULL)
+        q.addBindValue(proj[QLatin1String("name")].toString(QStringLiteral("")));
         q.addBindValue(startScreen.isEmpty() ? QVariant(QMetaType(QMetaType::QString))
                                              : QVariant(startScreen));
         q.addBindValue(proj[QLatin1String("revision")].toInt(0));
@@ -1568,7 +1607,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
                 "(id, name, register_id, unit, min_value, max_value, decimals, access) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(id);
-            q.addBindValue(obj[QLatin1String("name")].toString());
+            q.addBindValue(obj[QLatin1String("name")].toString(QStringLiteral("")));
             q.addBindValue(registerId);
 
             const QString unit = obj[QLatin1String("unit")].toString();
