@@ -2,7 +2,7 @@
 
 #include <QElapsedTimer>
 
-static constexpr int kInterFrameGapMs = 5;
+static constexpr int kInterFrameGapMs = 20;
 
 namespace DataCollection {
 namespace Comm {
