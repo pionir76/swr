@@ -50,6 +50,8 @@ ApiServer::ApiServer(Database::DeviceDatabase *db,
     , m_systemMonitor(systemMonitor)
     , m_trendFileRecorder(trendFileRecorder)
 {
+    m_sessionClock.start();
+    setSessionTimeout(SystemConfig::config().loginSecurity.sessionTimeoutMinutes);
 }
 
 ApiServer::~ApiServer()
@@ -309,16 +311,32 @@ std::optional<QHttpServerResponse> ApiServer::requireAuth(const QHttpServerReque
         return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
     }
 
-    const QString token = QString::fromUtf8(auth).remove(QStringLiteral("Bearer ")).trimmed();
+    const QString token = bearerToken(request);
 
     QString username;
+    bool expired = false;
     {
         QMutexLocker locker(&m_sessionMutex);
 
-        if (!m_sessions.contains(token)){
+        auto it = m_sessions.find(token);
+        if (it == m_sessions.end()){
             return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
         }
-        username = m_sessionUsers.value(token);
+
+        // A session ends after sessionTimeoutMinutes without an authenticated request.
+        const qint64 now = m_sessionClock.elapsed();
+        username = it->username;
+        if (now - it->lastUsedMs > m_sessionTimeoutMs) {
+            m_sessions.erase(it);
+            expired = true;
+        } else {
+            it->lastUsedMs = now;
+        }
+    }
+
+    if (expired) {
+        Util::Logger::info(QStringLiteral("Session expired: %1").arg(username));
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Unauthorized);
     }
 
     if (required == RequiredRole::Any)
@@ -352,17 +370,63 @@ std::optional<QHttpServerResponse> ApiServer::requireAuth(const QHttpServerReque
 QString ApiServer::createSession(const QString &username)
 {
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    QMutexLocker locker(&m_sessionMutex);
-    m_sessions.insert(token);
-    m_sessionUsers.insert(token, username);
+
+    QStringList expiredUsers;
+    {
+        QMutexLocker locker(&m_sessionMutex);
+        const qint64 now = m_sessionClock.elapsed();
+
+        // Sessions left behind by closed browsers are dropped here, so the table
+        // stays small without a cleanup timer.
+        for (auto it = m_sessions.begin(); it != m_sessions.end(); ) {
+            if (now - it->lastUsedMs > m_sessionTimeoutMs) {
+                expiredUsers.append(it->username);
+                it = m_sessions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        m_sessions.insert(token, Session{username, now});
+    }
+
+    for (const QString &user : std::as_const(expiredUsers))
+        Util::Logger::info(QStringLiteral("Session expired: %1").arg(user));
+
     return token;
 }
 
 QString ApiServer::removeSession(const QString &token)
 {
     QMutexLocker locker(&m_sessionMutex);
-    m_sessions.remove(token);
-    return m_sessionUsers.take(token);
+    return m_sessions.take(token).username;
+}
+
+int ApiServer::removeUserSessions(const QString &username, const QString &exceptToken)
+{
+    QMutexLocker locker(&m_sessionMutex);
+    int removed = 0;
+    for (auto it = m_sessions.begin(); it != m_sessions.end(); ) {
+        if (it->username == username && it.key() != exceptToken) {
+            it = m_sessions.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+void ApiServer::setSessionTimeout(int minutes)
+{
+    QMutexLocker locker(&m_sessionMutex);
+    m_sessionTimeoutMs = static_cast<qint64>(minutes) * 60 * 1000;
+}
+
+QString ApiServer::bearerToken(const QHttpServerRequest &request)
+{
+    return QString::fromUtf8(request.value("Authorization"))
+        .remove(QStringLiteral("Bearer ")).trimmed();
 }
 
 bool ApiServer::rejectIfPolling(QHttpServerResponse &out) const
@@ -466,10 +530,7 @@ QHttpServerResponse ApiServer::handleLogin(const QHttpServerRequest &request)
 
 QHttpServerResponse ApiServer::handleLogout(const QHttpServerRequest &request)
 {
-    const QString token    = QString::fromUtf8(request.value("Authorization"))
-                                 .remove(QStringLiteral("Bearer ")).trimmed();
-
-    const QString username = removeSession(token);
+    const QString username = removeSession(bearerToken(request));
     const QString ip       = request.remoteAddress().toString();
 
     if (!username.isEmpty()) {
@@ -1434,7 +1495,7 @@ QHttpServerResponse ApiServer::handlePostUser(const QHttpServerRequest &request)
     }
 
     // Validate password length
-    const int minPwLen = SystemConfig::config().loginSecurity.minPasswordLength;
+    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
     if (password.length() < minPwLen) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("password must be at least %1 characters").arg(minPwLen);
@@ -1531,17 +1592,17 @@ QHttpServerResponse ApiServer::handleDeleteUser(const QHttpServerRequest &reques
         return QHttpServerResponse(QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("User deleted: %1").arg(username));
+    const int ended = removeUserSessions(username);
+    Util::Logger::info(QStringLiteral("User deleted: %1 (%2 session(s) ended)").arg(username).arg(ended));
     return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
 }
 
 QString ApiServer::sessionUsername(const QHttpServerRequest &request) const
 {
-    const QString token = QString::fromUtf8(request.value("Authorization"))
-                              .remove(QStringLiteral("Bearer ")).trimmed();
+    const QString token = bearerToken(request);
 
     QMutexLocker locker(&m_sessionMutex);
-    return m_sessionUsers.value(token);
+    return m_sessions.value(token).username;
 }
 
 
@@ -1651,7 +1712,7 @@ QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &r
     const QString newPassword = body.value(QLatin1String("newPassword")).toString();
     
     // Validate new password length
-    const int minPwLen = SystemConfig::config().loginSecurity.minPasswordLength;
+    const int minPwLen = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity.minPasswordLength;
     if (newPassword.length() < minPwLen) {
         QJsonObject err;
         err[QLatin1String("error")] = QStringLiteral("newPassword must be at least %1 characters").arg(minPwLen);
@@ -1709,7 +1770,8 @@ QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &r
         if (currentHash != user.passwordHash) {
             QJsonObject err;
             err[QLatin1String("error")] = QStringLiteral("Current password is incorrect");
-            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Unauthorized);
+            // 400, not 401: the web treats 401 as an expired session.
+            return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
         }
     }
 
@@ -1725,7 +1787,10 @@ QHttpServerResponse ApiServer::handlePutUserPassword(const QHttpServerRequest &r
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("Password changed: %1 by %2").arg(username, caller));
+    // End the user's other sessions. The caller keeps the token that made this request.
+    const int ended = removeUserSessions(username, isSelf ? bearerToken(request) : QString());
+    Util::Logger::info(QStringLiteral("Password changed: %1 by %2 (%3 session(s) ended)")
+                           .arg(username, caller).arg(ended));
 
     QJsonObject resp;
     resp[QLatin1String("username")] = username;
@@ -1801,7 +1866,12 @@ QHttpServerResponse ApiServer::handlePutUserStatus(const QHttpServerRequest &req
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
-    Util::Logger::info(QStringLiteral("User status changed: %1 → %2").arg(username, statusStr));
+    // A disabled or locked user loses access at once, not at the next login.
+    int ended = 0;
+    if (newStatus != Model::UserStatus::Active)
+        ended = removeUserSessions(username);
+    Util::Logger::info(QStringLiteral("User status changed: %1 → %2 (%3 session(s) ended)")
+                           .arg(username, statusStr).arg(ended));
 
     QJsonObject resp;
     resp[QLatin1String("username")] = username;
@@ -1885,7 +1955,9 @@ QHttpServerResponse ApiServer::handleGetSecurityPolicy(const QHttpServerRequest 
 {
     if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
-    const LoginSecurityConfig &ls = SystemConfig::config().loginSecurity;
+    // Read the file, not SystemConfig: SystemConfig is loaded once at boot and
+    // does not see PUT /api/users/security-policy.
+    const LoginSecurityConfig ls = loadConfig(QStringLiteral(SR_CONFIG_FILE)).loginSecurity;
 
     QJsonObject resp;
     resp[QLatin1String("maxFailedAttempts")]     = ls.maxFailedAttempts;
@@ -1946,6 +2018,8 @@ QHttpServerResponse ApiServer::handlePutSecurityPolicy(const QHttpServerRequest 
         return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
     }
 
+    // Applies to existing sessions too: expiry is checked against the current value.
+    setSessionTimeout(ls.sessionTimeoutMinutes);
     Util::Logger::info(QStringLiteral("Login security policy updated."));
 
     QJsonObject resp;

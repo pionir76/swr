@@ -2,6 +2,9 @@
 
 #include <QObject>
 #include <QHttpServer>
+#include <QElapsedTimer>
+#include <QHash>
+#include <QMutex>
 #include <optional>
 
 namespace DataCollection::Database { class DeviceDatabase; }
@@ -40,6 +43,10 @@ private:
                                                    RequiredRole required = RequiredRole::Any) const;
     QString createSession(const QString &username);
     QString removeSession(const QString &token);  // returns username
+    // Ends every session of username except exceptToken; returns how many were ended.
+    int removeUserSessions(const QString &username, const QString &exceptToken = QString());
+    void setSessionTimeout(int minutes);
+    static QString bearerToken(const QHttpServerRequest &request);
 
     // return 409 while polling status, when ask modify.
     bool rejectIfPolling(QHttpServerResponse &out) const;
@@ -169,9 +176,16 @@ private:
     TrendHandler::TrendFileRecorder   *m_trendFileRecorder;
     QHttpServer m_server;
 
+    struct Session {
+        QString username;
+        qint64  lastUsedMs = 0;  // m_sessionClock time of the last authenticated request
+    };
+
+    // requireAuth() is const but refreshes lastUsedMs and drops expired sessions.
     mutable QMutex m_sessionMutex;
-    QSet<QString> m_sessions;
-    QMap<QString, QString> m_sessionUsers;  // token → username
+    mutable QHash<QString, Session> m_sessions;  // token → session
+    qint64 m_sessionTimeoutMs = 0;               // guarded by m_sessionMutex
+    QElapsedTimer m_sessionClock;                // monotonic: unaffected by NTP or manual time changes
 };
 
 } //namespace Api
