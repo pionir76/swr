@@ -2920,15 +2920,6 @@ QHttpServerResponse ApiServer::handlePutSystemTime(const QHttpServerRequest &req
 // HMI Tags
 // ===========================================================================
 
-static int decimalsFromScale(double scale)
-{
-    if (scale <= 0.0 || scale >= 1.0 - 1e-9) return 0;
-    int d = 0;
-    double s = scale;
-    while (s < 1.0 - 1e-9 && d < 6) { s *= 10.0; ++d; }
-    return d;
-}
-
 static QJsonObject hmiTagToJson(const Model::HmiTag &t, const Store::DeviceList &devices)
 {
     QJsonObject o;
@@ -3202,9 +3193,6 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
                                                      ? Model::computeQuality(state, now)
                                                      : Model::DataQuality::Disabled;
 
-        // TRANSITION: v and decimals stay until the frontend applies the scale itself.
-        const int decimals = decimalsFromScale(t.hasScale ? t.scale : reg.scale);
-
         // A register with no entry yet comes back default-constructed (isValid = true, value 0),
         // so also require that a value was actually received.
         const bool hasValue = state.isValid && state.lastUpdated.isValid();
@@ -3223,11 +3211,9 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
         }
 
         QJsonObject val;
-        val[QLatin1String("raw")] = raw;
-        val[QLatin1String("v")]   = hasValue ? QJsonValue(state.scaledValue) : QJsonValue(QJsonValue::Null);
+        val[QLatin1String("raw")]      = raw;
         val[QLatin1String("q")]        = DataCollection::Model::dataQualityToString(q);
         val[QLatin1String("unit")]     = t.unit.isEmpty()   ? reg.unit   : t.unit;
-        val[QLatin1String("decimals")] = decimals;
         val[QLatin1String("access")]   = t.access.isEmpty() ? (reg.readOnly ? QLatin1String("r") : QLatin1String("rw")) : t.access;
 
         values[t.id] = val;
@@ -3253,9 +3239,8 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
     }
     const QJsonObject body = doc.object();
 
-    // TRANSITION: "v" (scaled, converted here) is still accepted; "raw" wins when both are sent.
-    const bool hasRaw = body.contains(QLatin1String("raw"));
-    if (!body.contains(QLatin1String("tag")) || (!hasRaw && !body.contains(QLatin1String("v")))) {
+    // The frontend scales; the server writes the raw word as is.
+    if (!body.contains(QLatin1String("tag")) || !body.contains(QLatin1String("raw"))) {
         QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required fields: tag, raw");
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
     }
@@ -3300,40 +3285,23 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::UnprocessableEntity);
     }
 
+    const QJsonValue rawVal = body.value(QLatin1String("raw"));
+    const double d = rawVal.toDouble(-1.0);
+    const bool isCoil = (reg.type == Model::RegisterType::Coil);
+    const int  maxRaw = isCoil ? 1 : 65535;
+    if (!rawVal.isDouble() || d != std::floor(d) || d < 0 || d > maxRaw) {
+        QJsonObject e; e[QLatin1String("error")] = isCoil
+            ? QStringLiteral("'raw' must be 0 or 1 for a coil")
+            : QStringLiteral("'raw' must be an integer from 0 to 65535");
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+    }
+    const quint16 word = static_cast<quint16>(d);
+
     Model::WriteRequest req;
     req.config = reg;
-
-    if (hasRaw) {
-        const QJsonValue rawVal = body.value(QLatin1String("raw"));
-        const double d = rawVal.toDouble(-1.0);
-        const bool isCoil = (reg.type == Model::RegisterType::Coil);
-        const int  maxRaw = isCoil ? 1 : 65535;
-        if (!rawVal.isDouble() || d != std::floor(d) || d < 0 || d > maxRaw) {
-            QJsonObject e; e[QLatin1String("error")] = isCoil
-                ? QStringLiteral("'raw' must be 0 or 1 for a coil")
-                : QStringLiteral("'raw' must be an integer from 0 to 65535");
-            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
-        }
-        const quint16 word = static_cast<quint16>(d);
-        if (isCoil)
-            req.coilValues.append(word != 0);
-        req.rawValues.append(word);
-    } else if (reg.type == Model::RegisterType::Coil) {
-        const QJsonValue vVal = body.value(QLatin1String("v"));
-        bool coilVal;
-        if (vVal.isBool()) {
-            coilVal = vVal.toBool();
-        } else {
-            coilVal = (vVal.toDouble() != 0.0);
-        }
-        req.coilValues.append(coilVal);
-        req.rawValues.append(coilVal ? 1 : 0);
-    } else {
-        const double engVal = body.value(QLatin1String("v")).toDouble();
-        const double scale  = (reg.scale != 0.0) ? reg.scale : 1.0;
-        const double raw    = engVal / scale;
-        req.rawValues.append(static_cast<quint16>(qBound(0, qRound(raw), 65535)));
-    }
+    if (isCoil)
+        req.coilValues.append(word != 0);
+    req.rawValues.append(word);
 
     m_deviceList->enqueueWrite(reg.deviceId, std::move(req));
 
