@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QList>
 #include <QMetaType>
+#include <cmath>
 #include <limits>
 
 namespace DataCollection {
@@ -187,12 +188,22 @@ struct HmiTag {
     double  minValue    = 0.0;
     bool    hasMax      = false;
     double  maxValue    = 0.0;
-    bool    hasDecimals = false;
-    int     decimals    = 0;
+    bool    hasScale    = false;   // false = inherit the register scale
+    double  scale       = 1.0;     // stored only; the frontend applies it to raw values
     QString access;                // "" = inherit, "r", "rw"
     QString createdAt;
     QString updatedAt;
 };
+
+// Scales an HMI tag may use; the same choices the register form offers.
+inline bool isHmiTagScale(double scale)
+{
+    static constexpr double kScales[] = { 100.0, 10.0, 1.0, 0.1, 0.01, 0.001 };
+    for (double s : kScales)
+        if (std::abs(scale - s) <= s * 1e-6)
+            return true;
+    return false;
+}
 
 struct HmiScreen {
     QString id;                    // PK (영숫자+_+-, max 64)

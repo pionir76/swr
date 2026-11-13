@@ -303,7 +303,7 @@ bool DeviceDatabase::initSchema(QString& error)
             "  unit        TEXT,"
             "  min_value   REAL,"
             "  max_value   REAL,"
-            "  decimals    INTEGER,"
+            "  scale       REAL,"
             "  access      TEXT    CHECK(access IS NULL OR access IN ('r', 'rw')),"
             "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "  updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP"
@@ -380,6 +380,12 @@ bool DeviceDatabase::initSchema(QString& error)
 
         mq.exec(QStringLiteral(
             "ALTER TABLE devices ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"));
+        // ignore error — column may already exist
+
+        // HMI tags: "decimals" (display digits) was replaced by "scale" (applied to the
+        // raw value by the frontend). Older databases keep the unused decimals column,
+        // and their tags start with scale NULL (inherit the register scale).
+        mq.exec(QStringLiteral("ALTER TABLE hmi_tags ADD COLUMN scale REAL"));
         // ignore error — column may already exist
     }
 
@@ -1224,7 +1230,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
         QString  id;
         QString  name;
         int      unifiedAddress = -1;
-        QVariant unit, minValue, maxValue, decimals, access, createdAt, updatedAt;
+        QVariant unit, minValue, maxValue, scale, access, createdAt, updatedAt;
     };
     QList<TagSnapshot> keptTags;
     // Backups made before HMI support carry an empty hmi object; treat them as
@@ -1238,7 +1244,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     if (relinkTags) {
         if (!q.exec(QStringLiteral(
                 "SELECT t.id, t.name, r.unified_register_id, t.unit, t.min_value, "
-                "t.max_value, t.decimals, t.access, t.created_at, t.updated_at "
+                "t.max_value, t.scale, t.access, t.created_at, t.updated_at "
                 "FROM hmi_tags t JOIN registers r ON r.id = t.register_id"))) {
             error = q.lastError().text();
             db.rollback();
@@ -1252,7 +1258,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             s.unit           = q.value(3);
             s.minValue       = q.value(4);
             s.maxValue       = q.value(5);
-            s.decimals       = q.value(6);
+            s.scale          = q.value(6);
             s.access         = q.value(7);
             s.createdAt      = q.value(8);
             s.updatedAt      = q.value(9);
@@ -1406,7 +1412,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
 
             q.prepare(QStringLiteral(
                 "INSERT INTO hmi_tags "
-                "(id, name, register_id, unit, min_value, max_value, decimals, access, "
+                "(id, name, register_id, unit, min_value, max_value, scale, access, "
                 "created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(s.id);
@@ -1415,7 +1421,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.addBindValue(s.unit);
             q.addBindValue(s.minValue);
             q.addBindValue(s.maxValue);
-            q.addBindValue(s.decimals);
+            q.addBindValue(s.scale);
             q.addBindValue(s.access);
             q.addBindValue(s.createdAt);
             q.addBindValue(s.updatedAt);
@@ -1604,7 +1610,7 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
 
             q.prepare(QStringLiteral(
                 "INSERT INTO hmi_tags "
-                "(id, name, register_id, unit, min_value, max_value, decimals, access) "
+                "(id, name, register_id, unit, min_value, max_value, scale, access) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
             q.addBindValue(id);
             q.addBindValue(obj[QLatin1String("name")].toString(QStringLiteral("")));
@@ -1616,9 +1622,12 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
             q.addBindValue(optReal("minValue"));
             q.addBindValue(optReal("maxValue"));
 
-            const QJsonValue dec = obj[QLatin1String("decimals")];
-            q.addBindValue(dec.isDouble() ? QVariant(dec.toInt())
-                                          : QVariant(QMetaType(QMetaType::Int)));
+            // Older backups carry "decimals" instead; it is dropped and the tag
+            // inherits the register scale.
+            const QJsonValue sc = obj[QLatin1String("scale")];
+            q.addBindValue(sc.isDouble() && Model::isHmiTagScale(sc.toDouble())
+                               ? QVariant(sc.toDouble())
+                               : QVariant(QMetaType(QMetaType::Double)));
 
             const QString access = obj[QLatin1String("access")].toString();
             q.addBindValue(access.isEmpty() ? QVariant(QMetaType(QMetaType::QString))
@@ -1735,7 +1744,7 @@ static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
     if (!q.value(3).isNull()) tag.unit        = q.value(3).toString();
     if (!q.value(4).isNull()) { tag.hasMin    = true; tag.minValue  = q.value(4).toDouble(); }
     if (!q.value(5).isNull()) { tag.hasMax    = true; tag.maxValue  = q.value(5).toDouble(); }
-    if (!q.value(6).isNull()) { tag.hasDecimals = true; tag.decimals = q.value(6).toInt();   }
+    if (!q.value(6).isNull()) { tag.hasScale  = true; tag.scale     = q.value(6).toDouble(); }
     if (!q.value(7).isNull()) tag.access      = q.value(7).toString();
 
     tag.createdAt  = q.value(8).toString();
@@ -1749,7 +1758,7 @@ QList<Model::HmiTag> DeviceDatabase::loadHmiTags(QString &error) const
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     if (!q.exec(QStringLiteral(
-            "SELECT id,name,register_id,unit,min_value,max_value,decimals,access,created_at,updated_at "
+            "SELECT id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at "
             "FROM hmi_tags ORDER BY id"))) {
         error = q.lastError().text();
         return list;
@@ -1765,7 +1774,7 @@ Model::HmiTag DeviceDatabase::loadHmiTag(const QString &id, bool &found, QString
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "SELECT id,name,register_id,unit,min_value,max_value,decimals,access,created_at,updated_at "
+        "SELECT id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at "
         "FROM hmi_tags WHERE id=?"));
     q.addBindValue(id);
     if (!q.exec()) { error = q.lastError().text(); return {}; }
@@ -1779,7 +1788,7 @@ bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "INSERT INTO hmi_tags (id,name,register_id,unit,min_value,max_value,decimals,access) "
+        "INSERT INTO hmi_tags (id,name,register_id,unit,min_value,max_value,scale,access) "
         "VALUES (?,?,?,?,?,?,?,?)"));
     q.addBindValue(tag.id);
     q.addBindValue(tag.name);
@@ -1787,7 +1796,7 @@ bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
     q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
     q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
     q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasDecimals       ? QVariant(tag.decimals)  : QVariant(QMetaType(QMetaType::Int)));
+    q.addBindValue(tag.hasScale          ? QVariant(tag.scale)     : QVariant(QMetaType(QMetaType::Double)));
     q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
     if (!q.exec()) { error = q.lastError().text(); return false; }
     return true;
@@ -1798,14 +1807,14 @@ bool DeviceDatabase::updateHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "UPDATE hmi_tags SET name=?,register_id=?,unit=?,min_value=?,max_value=?,decimals=?,access=?,"
+        "UPDATE hmi_tags SET name=?,register_id=?,unit=?,min_value=?,max_value=?,scale=?,access=?,"
         "updated_at=CURRENT_TIMESTAMP WHERE id=?"));
     q.addBindValue(tag.name);
     q.addBindValue(tag.registerId);
     q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
     q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
     q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasDecimals       ? QVariant(tag.decimals)  : QVariant(QMetaType(QMetaType::Int)));
+    q.addBindValue(tag.hasScale          ? QVariant(tag.scale)     : QVariant(QMetaType(QMetaType::Double)));
     q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }

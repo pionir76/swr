@@ -328,7 +328,7 @@ QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabas
         if (!t.unit.isEmpty())  obj[QLatin1String("unit")]     = t.unit;
         if (t.hasMin)           obj[QLatin1String("minValue")] = t.minValue;
         if (t.hasMax)           obj[QLatin1String("maxValue")] = t.maxValue;
-        if (t.hasDecimals)      obj[QLatin1String("decimals")] = t.decimals;
+        if (t.hasScale)         obj[QLatin1String("scale")]    = t.scale;
         if (!t.access.isEmpty()) obj[QLatin1String("access")]  = t.access;
 
         tagArr.append(obj);

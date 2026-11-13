@@ -30,6 +30,7 @@
 #include <QTcpServer>
 #include <QTimer>
 #include <sys/statvfs.h>
+#include <cmath>
 #include <algorithm>
 
 using namespace DataCollection;
@@ -2959,11 +2960,18 @@ static QJsonObject hmiTagToJson(const Model::HmiTag &t, const Store::DeviceList 
     src[QLatin1String("registerDisplayName")] = orNull(reg.displayName);
     src[QLatin1String("localAddress")]        = orNull(reg.localAddress);
     src[QLatin1String("unifiedAddress")]      = orNull(reg.unifiedAddress);
+    // What the frontend needs to turn raw values into display values.
+    src[QLatin1String("registerType")]        = orNull(Model::registerTypeToString(reg.type));
+    src[QLatin1String("length")]              = orNull(reg.length);
+    src[QLatin1String("scale")]               = orNull(reg.scale);
+    src[QLatin1String("isSigned")]            = orNull(reg.isSigned);
+    src[QLatin1String("minValue")]            = orNull(reg.minValue);
+    src[QLatin1String("maxValue")]            = orNull(reg.maxValue);
     o[QLatin1String("source")] = src;
     o[QLatin1String("unit")]     = t.unit.isEmpty()    ? QJsonValue()       : t.unit;
     o[QLatin1String("min")]      = t.hasMin            ? QJsonValue(t.minValue) : QJsonValue();
     o[QLatin1String("max")]      = t.hasMax            ? QJsonValue(t.maxValue) : QJsonValue();
-    o[QLatin1String("decimals")] = t.hasDecimals       ? QJsonValue(t.decimals) : QJsonValue();
+    o[QLatin1String("scale")]    = t.hasScale          ? QJsonValue(t.scale)    : QJsonValue();
     o[QLatin1String("access")]   = t.access.isEmpty()  ? QJsonValue()       : t.access;
     o[QLatin1String("createdAt")] = t.createdAt;
     o[QLatin1String("updatedAt")] = t.updatedAt;
@@ -2990,8 +2998,16 @@ static bool parseHmiTagBody(const QJsonObject &body, Model::HmiTag &tag, QString
         { tag.hasMin = true; tag.minValue = body.value(QLatin1String("min")).toDouble(); }
     if (body.contains(QLatin1String("max")) && !body.value(QLatin1String("max")).isNull())
         { tag.hasMax = true; tag.maxValue = body.value(QLatin1String("max")).toDouble(); }
-    if (body.contains(QLatin1String("decimals")) && !body.value(QLatin1String("decimals")).isNull())
-        { tag.hasDecimals = true; tag.decimals = body.value(QLatin1String("decimals")).toInt(); }
+    // "decimals" is no longer accepted and is ignored if sent.
+    if (body.contains(QLatin1String("scale")) && !body.value(QLatin1String("scale")).isNull()) {
+        const QJsonValue sc = body.value(QLatin1String("scale"));
+        if (!sc.isDouble() || !Model::isHmiTagScale(sc.toDouble())) {
+            err = QStringLiteral("'scale' must be null or one of 100, 10, 1, 0.1, 0.01, 0.001");
+            return false;
+        }
+        tag.hasScale = true;
+        tag.scale    = sc.toDouble();
+    }
     if (body.contains(QLatin1String("access"))) {
         const QString acc = body.value(QLatin1String("access")).toString();
         if (!acc.isEmpty() && acc != QLatin1String("r") && acc != QLatin1String("rw")) {
@@ -3186,15 +3202,29 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
                                                      ? Model::computeQuality(state, now)
                                                      : Model::DataQuality::Disabled;
 
-        // Effective decimals
-        int decimals = t.hasDecimals ? t.decimals : decimalsFromScale(reg.scale);
+        // TRANSITION: v and decimals stay until the frontend applies the scale itself.
+        const int decimals = decimalsFromScale(t.hasScale ? t.scale : reg.scale);
 
         // A register with no entry yet comes back default-constructed (isValid = true, value 0),
         // so also require that a value was actually received.
+        const bool hasValue = state.isValid && state.lastUpdated.isValid();
+
+        // raw: the word read from the device, unscaled and unsigned (coils 0/1).
+        // null when there is no usable value (bad, disabled, nothing received yet).
+        // Multi-word registers are not supported by HMI tags yet, so they have no raw.
+        const bool usable = q != Model::DataQuality::Bad && q != Model::DataQuality::Disabled;
+        QJsonValue raw;
+        if (hasValue && usable && reg.length == 1) {
+            if (reg.type == Model::RegisterType::Coil || reg.type == Model::RegisterType::DiscreteInput) {
+                if (!state.rawCoils.isEmpty()) raw = state.rawCoils.first() ? 1 : 0;
+            } else if (!state.rawRegisters.isEmpty()) {
+                raw = static_cast<int>(state.rawRegisters.first());
+            }
+        }
+
         QJsonObject val;
-        val[QLatin1String("v")] = (state.isValid && state.lastUpdated.isValid())
-                                  ? QJsonValue(state.scaledValue)
-                                  : QJsonValue(QJsonValue::Null);
+        val[QLatin1String("raw")] = raw;
+        val[QLatin1String("v")]   = hasValue ? QJsonValue(state.scaledValue) : QJsonValue(QJsonValue::Null);
         val[QLatin1String("q")]        = DataCollection::Model::dataQualityToString(q);
         val[QLatin1String("unit")]     = t.unit.isEmpty()   ? reg.unit   : t.unit;
         val[QLatin1String("decimals")] = decimals;
@@ -3223,8 +3253,10 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
     }
     const QJsonObject body = doc.object();
 
-    if (!body.contains(QLatin1String("tag")) || !body.contains(QLatin1String("v"))) {
-        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required fields: tag, v");
+    // TRANSITION: "v" (scaled, converted here) is still accepted; "raw" wins when both are sent.
+    const bool hasRaw = body.contains(QLatin1String("raw"));
+    if (!body.contains(QLatin1String("tag")) || (!hasRaw && !body.contains(QLatin1String("v")))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required fields: tag, raw");
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
     }
 
@@ -3262,11 +3294,32 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::Conflict);
     }
 
-    const QJsonValue vVal = body.value(QLatin1String("v"));
+    if (reg.length != 1) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("HMI write supports single-word registers only (register length %1)").arg(reg.length);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::UnprocessableEntity);
+    }
+
     Model::WriteRequest req;
     req.config = reg;
 
-    if (reg.type == Model::RegisterType::Coil) {
+    if (hasRaw) {
+        const QJsonValue rawVal = body.value(QLatin1String("raw"));
+        const double d = rawVal.toDouble(-1.0);
+        const bool isCoil = (reg.type == Model::RegisterType::Coil);
+        const int  maxRaw = isCoil ? 1 : 65535;
+        if (!rawVal.isDouble() || d != std::floor(d) || d < 0 || d > maxRaw) {
+            QJsonObject e; e[QLatin1String("error")] = isCoil
+                ? QStringLiteral("'raw' must be 0 or 1 for a coil")
+                : QStringLiteral("'raw' must be an integer from 0 to 65535");
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        const quint16 word = static_cast<quint16>(d);
+        if (isCoil)
+            req.coilValues.append(word != 0);
+        req.rawValues.append(word);
+    } else if (reg.type == Model::RegisterType::Coil) {
+        const QJsonValue vVal = body.value(QLatin1String("v"));
         bool coilVal;
         if (vVal.isBool()) {
             coilVal = vVal.toBool();
@@ -3276,7 +3329,7 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
         req.coilValues.append(coilVal);
         req.rawValues.append(coilVal ? 1 : 0);
     } else {
-        const double engVal = vVal.toDouble();
+        const double engVal = body.value(QLatin1String("v")).toDouble();
         const double scale  = (reg.scale != 0.0) ? reg.scale : 1.0;
         const double raw    = engVal / scale;
         req.rawValues.append(static_cast<quint16>(qBound(0, qRound(raw), 65535)));
