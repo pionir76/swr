@@ -13,5 +13,18 @@
     "additionalDirectories": [
       "/home/dev3/yocto-imx6ull/sources/meta-swr/recipes-qt/qt6"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/../swr_web/docs/collab/open-requests.py\" backend --hook 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }
