@@ -166,7 +166,6 @@ RestorePreview RestoreManager::validate(const QByteArray &zipData, QString &erro
     if (files.contains(QStringLiteral("config.json"))) {
         preview.config.available = true;
         preview.config.count     = 1;
-        preview.config.warning   = QStringLiteral("Network settings will NOT be restored unless explicitly enabled");
     }
 
     if (files.contains(QStringLiteral("devices.json"))) {
@@ -333,7 +332,8 @@ bool RestoreManager::apply(const QString &restoreId,
     }
 
     //-----------------------------------------------------------//
-    // 6. Config restore (system, serial, modbus_server, login_security, network)
+    // 6. Config restore (system, serial, modbus_server, login_security).
+    //    A "network" section in older backups is ignored: the OS image fixes the port addresses.
     //-----------------------------------------------------------//
     if (options.config) {
         const QByteArray configData = readJson(QStringLiteral("config.json"), ok);
@@ -373,27 +373,6 @@ bool RestoreManager::apply(const QString &restoreId,
                     cfg.loginSecurity.sessionTimeoutMinutes = ls[QLatin1String("sessionTimeoutMinutes")].toInt(cfg.loginSecurity.sessionTimeoutMinutes);
                     cfg.loginSecurity.minPasswordLength     = ls[QLatin1String("minPasswordLength")].toInt(cfg.loginSecurity.minPasswordLength);
                     cfg.loginSecurity.autoLogout            = ls[QLatin1String("autoLogout")].toBool(cfg.loginSecurity.autoLogout);
-                }
-                // network (기본 OFF)
-                if (options.network) {
-                    const QJsonArray ifaces =
-                        root[QLatin1String("network")].toObject()[QLatin1String("interfaces")].toArray();
-                    if (!ifaces.isEmpty()) {
-                        cfg.networkInterfaces.clear();
-                        for (const QJsonValue &v : ifaces) {
-                            const QJsonObject obj = v.toObject();
-                            NetInterfaceConfig iface;
-                            iface.name      = obj[QLatin1String("name")].toString();
-                            iface.role      = obj[QLatin1String("role")].toString();
-                            iface.enabled   = obj[QLatin1String("enabled")].toBool(true);
-                            iface.mode      = obj[QLatin1String("mode")].toString(QStringLiteral("static"));
-                            iface.ipAddress = obj[QLatin1String("ipAddress")].toString();
-                            iface.netmask   = obj[QLatin1String("netmask")].toString();
-                            iface.gateway   = obj[QLatin1String("gateway")].toString();
-                            iface.dns       = obj[QLatin1String("dns")].toString();
-                            cfg.networkInterfaces.append(iface);
-                        }
-                    }
                 }
 
                 QString saveErr;

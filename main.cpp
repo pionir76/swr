@@ -12,6 +12,7 @@
 #include "data_collection/polling/PollingManager.h"
 #include "api/ApiServer.h"
 #include "utils/SystemMonitor.h"
+#include "utils/NetworkPorts.h"
 #include "modbus_server/ModbusTcpServer.h"
 #include "TrendHandler/TrendFileRecorder.h"
 
@@ -99,17 +100,16 @@ int main(int argc, char *argv[])
         .arg(SR_LAST_UPDATE_DATE)
     );
 
-    Util::Logger::info(
-        QStringLiteral("Ethernet Device %1 IP : %2")
-                       .arg(config.networkInterfaces[0].name)
-                       .arg(config.networkInterfaces[0].ipAddress)
-    );
-
-    Util::Logger::info(
-        QStringLiteral("Ethernet Device %1 IP : %2")
-                       .arg(config.networkInterfaces[1].name)
-                       .arg(config.networkInterfaces[1].ipAddress)
-    );
+    // Port addresses come from the OS image; log what is actually up.
+    for (const Util::NetworkPort &port : Util::readNetworkPorts()) {
+        Util::Logger::info(
+            QStringLiteral("Ethernet %1 port (%2): %3/%4, link %5")
+                .arg(port.role,
+                     port.iface.isEmpty() ? QStringLiteral("not found") : port.iface,
+                     port.ipAddress.isEmpty() ? QStringLiteral("-") : port.ipAddress)
+                .arg(port.prefixLength)
+                .arg(port.linkUp ? QStringLiteral("up") : QStringLiteral("down")));
+    }
 
     Util::Logger::info(
         QStringLiteral("Serial 485 Device %1 : %2 | %3 | %4 | %5")
@@ -126,29 +126,6 @@ int main(int argc, char *argv[])
             .arg(config.modbusServer.port)
             .arg(config.modbusServer.slaveId)
         );
-
-    //---------------------------------------------------------------------//
-    // Init Network Config
-    //---------------------------------------------------------------------//
-    /*
-    for (const NetInterfaceConfig &iface : config.networkInterfaces) {
-        if (!iface.enabled) continue;
-
-        Util::NetworkConfig netConfig;
-        netConfig.interfaceName = iface.name;
-        netConfig.ipAddress     = iface.ipAddress;
-        netConfig.netmask       = iface.netmask;
-        netConfig.gateway       = iface.gateway;
-
-        QString netError;
-        if (!Util::applyNetworkConfig(netConfig, netError)) {
-            Util::Logger::error(QStringLiteral("Network config failed [%1]: %2").arg(iface.name, netError));
-        } else {
-            Util::Logger::info(QStringLiteral("Network configured: %1 (%2) → %3")
-                    .arg(iface.name, iface.role, iface.ipAddress));
-        }
-    }
-    */
 
     //-----------------------------------------------------------------//
     // Open SQLite DB & Init Schema

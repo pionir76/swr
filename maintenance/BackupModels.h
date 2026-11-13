@@ -36,7 +36,6 @@ struct BackupManifest {
 
 struct RestoreOptions {
     bool config    = true;
-    bool network   = false;  // 네트워크 설정은 기본 OFF (장치 접근 불능 방지)
     bool devices   = true;
     bool registers = true;
     bool users     = true;

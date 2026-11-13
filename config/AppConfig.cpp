@@ -15,28 +15,6 @@ AppConfig factoryDefaultConfig()
 {
     AppConfig cfg;
 
-    NetInterfaceConfig eth0;
-    eth0.name      = QStringLiteral("eth0");
-    eth0.role      = QStringLiteral("field");
-    eth0.enabled   = true;
-    eth0.mode      = QStringLiteral("static");
-    eth0.ipAddress = QStringLiteral("192.168.0.150");
-    eth0.netmask   = QStringLiteral("255.255.255.0");
-    eth0.gateway   = QStringLiteral("192.168.0.1");
-    eth0.dns       = QStringLiteral("8.8.8.8");
-    cfg.networkInterfaces.append(eth0);
-
-    NetInterfaceConfig eth1;
-    eth1.name      = QStringLiteral("eth1");
-    eth1.role      = QStringLiteral("service");
-    eth1.enabled   = true;
-    eth1.mode      = QStringLiteral("static");
-    eth1.ipAddress = QStringLiteral("192.168.1.150");
-    eth1.netmask   = QStringLiteral("255.255.255.0");
-    eth1.gateway   = QStringLiteral("");
-    eth1.dns       = QStringLiteral("");
-    cfg.networkInterfaces.append(eth1);
-
     cfg.rs485.device   = QStringLiteral("/dev/ttymxc1");
     cfg.rs485.baudRate = 9600;
     cfg.rs485.dataBits = 8;
@@ -88,29 +66,6 @@ AppConfig loadConfig(const QString &filePath)
     }
 
     const QJsonObject root = doc.object();
-
-    //-------------------------------------------------------------//
-    // Load ethernet network
-    //-------------------------------------------------------------//
-    const QJsonArray ifaces =
-        root.value(QLatin1String("network")).toObject()
-            .value(QLatin1String("interfaces")).toArray();
-
-    for (const QJsonValue &v : ifaces) {
-        const QJsonObject obj = v.toObject();
-        NetInterfaceConfig iface;
-
-        iface.name      = obj.value(QLatin1String("name")).toString();
-        iface.role      = obj.value(QLatin1String("role")).toString();
-        iface.enabled   = obj.value(QLatin1String("enabled")).toBool(true);
-        iface.mode      = obj.value(QLatin1String("mode")).toString(QStringLiteral("static"));
-        iface.ipAddress = obj.value(QLatin1String("ipAddress")).toString();
-        iface.netmask   = obj.value(QLatin1String("netmask")).toString();
-        iface.gateway   = obj.value(QLatin1String("gateway")).toString();
-        iface.dns       = obj.value(QLatin1String("dns")).toString();
-
-        config.networkInterfaces.append(iface);
-    }
 
     //-------------------------------------------------------------//
     // Load Serial network
@@ -179,25 +134,6 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
 {
     Util::Logger::info(QStringLiteral("Updated system config file"));
 
-    QJsonArray ifaces;
-    for (const NetInterfaceConfig &iface : config.networkInterfaces) {
-        QJsonObject obj;
-
-        obj[QLatin1String("name")]      = iface.name;
-        obj[QLatin1String("role")]      = iface.role;
-        obj[QLatin1String("enabled")]   = iface.enabled;
-        obj[QLatin1String("mode")]      = iface.mode;
-        obj[QLatin1String("ipAddress")] = iface.ipAddress;
-        obj[QLatin1String("netmask")]   = iface.netmask;
-        obj[QLatin1String("gateway")]   = iface.gateway;
-        obj[QLatin1String("dns")]       = iface.dns;
-
-        ifaces.append(obj);
-    }
-
-    QJsonObject net;
-    net[QLatin1String("interfaces")] = ifaces;
-
     QJsonObject serial;
     serial[QLatin1String("device")]   = config.rs485.device;
     serial[QLatin1String("baudRate")] = config.rs485.baudRate;
@@ -242,7 +178,6 @@ bool saveConfig(const QString &filePath, const AppConfig &config, QString &error
     hmi[QLatin1String("maxScreens")] = config.hmi.maxScreens;
 
     QJsonObject root;
-    root[QLatin1String("network")]        = net;
     root[QLatin1String("serial")]         = serial;
     root[QLatin1String("system")]         = sys;
     root[QLatin1String("modbus_server")]  = mbs;

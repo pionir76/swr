@@ -26,12 +26,6 @@ const Rs485Config &rs485()
     return s_config.rs485;
 }
 
-const QList<NetInterfaceConfig> &networkInterfaces()
-{
-    Q_ASSERT_X(s_initialized, "SystemConfig::networkInterfaces", "init() must be called before networkInterfaces()");
-    return s_config.networkInterfaces;
-}
-
 const SysSettings &system()
 {
     Q_ASSERT_X(s_initialized, "SystemConfig::system", "init() must be called before system()");

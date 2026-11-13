@@ -10,6 +10,7 @@
 #include "../data_collection/polling/PollingManager.h"
 #include "../utils/Logger.h"
 #include "../utils/SystemMonitor.h"
+#include "../utils/NetworkPorts.h"
 #include "../TrendHandler/TrendFileRecorder.h"
 #include "../TrendHandler/TrendFileReader.h"
 
@@ -190,6 +191,8 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePutConfigModbusServer(req); });
     m_server.route("/api/system/restart", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostRestart(req); });
+    m_server.route("/api/system/network", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetSystemNetwork(req); });
     m_server.route("/api/system/info", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &req) { return handleGetSystemInfo(req); });
 
@@ -2039,18 +2042,20 @@ QHttpServerResponse ApiServer::handleGetConfig(const QHttpServerRequest &request
 
     const AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
 
-    // network
+    // network: read from the OS, not from config.json (the OS image fixes the
+    // port addresses). Kept in the old shape for existing screens;
+    // GET /api/system/network has the full port status.
     QJsonArray ifaces;
-    for (const NetInterfaceConfig &iface : config.networkInterfaces) {
+    for (const Util::NetworkPort &port : Util::readNetworkPorts()) {
         QJsonObject obj;
-        obj[QLatin1String("name")]      = iface.name;
-        obj[QLatin1String("role")]      = iface.role;
-        obj[QLatin1String("enabled")]   = iface.enabled;
-        obj[QLatin1String("mode")]      = iface.mode;
-        obj[QLatin1String("ipAddress")] = iface.ipAddress;
-        obj[QLatin1String("netmask")]   = iface.netmask;
-        obj[QLatin1String("gateway")]   = iface.gateway;
-        obj[QLatin1String("dns")]       = iface.dns;
+        obj[QLatin1String("name")]      = port.iface;
+        obj[QLatin1String("role")]      = port.role;
+        obj[QLatin1String("enabled")]   = port.present;
+        obj[QLatin1String("mode")]      = QStringLiteral("static");
+        obj[QLatin1String("ipAddress")] = port.ipAddress;
+        obj[QLatin1String("netmask")]   = port.netmask;
+        obj[QLatin1String("gateway")]   = port.gateway;
+        obj[QLatin1String("dns")]       = port.dns.join(QLatin1Char(','));
         ifaces.append(obj);
     }
     QJsonObject net;
@@ -2110,7 +2115,6 @@ QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &r
 
     // Keep (version/revision/lastUpdate/specialCode)
     AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
-    config.networkInterfaces = defaults.networkInterfaces;
     config.rs485             = defaults.rs485;
     config.system            = defaults.system;
     config.modbusServer      = defaults.modbusServer;
@@ -2125,23 +2129,6 @@ QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &r
     }
 
     Util::Logger::info(QStringLiteral("Config reset to factory defaults."));
-
-    // network
-    QJsonArray ifaces;
-    for (const NetInterfaceConfig &iface : defaults.networkInterfaces) {
-        QJsonObject obj;
-        obj[QLatin1String("name")]      = iface.name;
-        obj[QLatin1String("role")]      = iface.role;
-        obj[QLatin1String("enabled")]   = iface.enabled;
-        obj[QLatin1String("mode")]      = iface.mode;
-        obj[QLatin1String("ipAddress")] = iface.ipAddress;
-        obj[QLatin1String("netmask")]   = iface.netmask;
-        obj[QLatin1String("gateway")]   = iface.gateway;
-        obj[QLatin1String("dns")]       = iface.dns;
-        ifaces.append(obj);
-    }
-    QJsonObject net;
-    net[QLatin1String("interfaces")] = ifaces;
 
     // serial
     QJsonObject serial;
@@ -2163,7 +2150,6 @@ QHttpServerResponse ApiServer::handlePostConfigReset(const QHttpServerRequest &r
     mbs[QLatin1String("slaveId")] = defaults.modbusServer.slaveId;
 
     QJsonObject resp;
-    resp[QLatin1String("network")]         = net;
     resp[QLatin1String("serial")]          = serial;
     resp[QLatin1String("system")]          = sys;
     resp[QLatin1String("modbusServer")]    = mbs;
@@ -2175,46 +2161,13 @@ QHttpServerResponse ApiServer::handlePutConfigNetwork(const QHttpServerRequest &
 {
     if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
 
-    const QJsonDocument doc = QJsonDocument::fromJson(request.body());
-    if (!doc.isObject())
-        return QHttpServerResponse(QHttpServerResponse::StatusCode::BadRequest);
-
-    const QJsonArray ifaces = doc.object().value(QLatin1String("interfaces")).toArray();
-    if (ifaces.isEmpty()) {
-        QJsonObject err;
-        err[QLatin1String("error")] = QStringLiteral("interfaces array is required");
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::BadRequest);
-    }
-
-    AppConfig config = loadConfig(QStringLiteral(SR_CONFIG_FILE));
-
-    config.networkInterfaces.clear();
-    for (const QJsonValue &v : ifaces) {
-        const QJsonObject obj = v.toObject();
-        NetInterfaceConfig iface;
-        iface.name      = obj.value(QLatin1String("name")).toString();
-        iface.role      = obj.value(QLatin1String("role")).toString();
-        iface.enabled   = obj.value(QLatin1String("enabled")).toBool(true);
-        iface.mode      = obj.value(QLatin1String("mode")).toString(QStringLiteral("static"));
-        iface.ipAddress = obj.value(QLatin1String("ipAddress")).toString();
-        iface.netmask   = obj.value(QLatin1String("netmask")).toString();
-        iface.gateway   = obj.value(QLatin1String("gateway")).toString();
-        iface.dns       = obj.value(QLatin1String("dns")).toString();
-        config.networkInterfaces.append(iface);
-    }
-
-    QString saveError;
-    if (!saveConfig(QStringLiteral(SR_CONFIG_FILE), config, saveError)) {
-        Util::Logger::error(QStringLiteral("saveConfig (network) failed: %1").arg(saveError));
-        QJsonObject err;
-        err[QLatin1String("error")] = saveError;
-        return QHttpServerResponse(err, QHttpServerResponse::StatusCode::InternalServerError);
-    }
-
-    Util::Logger::info(QStringLiteral("Network config saved."));
-    QJsonObject resp;
-    resp[QLatin1String("restartRequired")] = true;
-    return QHttpServerResponse(resp);
+    // The OS image fixes the port addresses (meta-swr swr-network-config).
+    // This endpoint only ever saved to config.json, which nothing applied.
+    QJsonObject err;
+    err[QLatin1String("error")] =
+        QStringLiteral("Network settings are fixed by the OS image and cannot be changed. "
+                       "Use GET /api/system/network to read them.");
+    return QHttpServerResponse(err, QHttpServerResponse::StatusCode::Gone);
 }
 
 QHttpServerResponse ApiServer::handlePutConfigSerial(const QHttpServerRequest &request)
@@ -2616,7 +2569,6 @@ QHttpServerResponse ApiServer::handleRestoreApply(const QHttpServerRequest &requ
     const QJsonObject optJson = body[QLatin1String("options")].toObject();
     Maintenance::RestoreOptions options;
     options.config    = optJson[QLatin1String("config")].toBool(true);
-    options.network   = optJson[QLatin1String("network")].toBool(false);
     options.devices   = optJson[QLatin1String("devices")].toBool(true);
     options.registers = optJson[QLatin1String("registers")].toBool(true);
     options.users     = optJson[QLatin1String("users")].toBool(true);
@@ -2692,6 +2644,35 @@ QHttpServerResponse ApiServer::handlePostFactoryReset(const QHttpServerRequest &
     QJsonObject resp;
     resp[QLatin1String("ok")]              = true;
     resp[QLatin1String("restartRequired")] = true;
+    return QHttpServerResponse(resp);
+}
+
+QHttpServerResponse ApiServer::handleGetSystemNetwork(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request)) return std::move(*err);
+
+    QJsonArray ports;
+    for (const Util::NetworkPort &port : Util::readNetworkPorts()) {
+        QJsonObject obj;
+        obj[QLatin1String("role")]         = port.role;
+        obj[QLatin1String("iface")]        = port.iface;
+        obj[QLatin1String("present")]      = port.present;
+        obj[QLatin1String("linkUp")]       = port.linkUp;
+        obj[QLatin1String("speedMbps")]    = port.speedMbps;
+        obj[QLatin1String("duplex")]       = port.duplex;
+        obj[QLatin1String("macAddress")]   = port.macAddress;
+        obj[QLatin1String("ipAddress")]    = port.ipAddress;
+        obj[QLatin1String("prefixLength")] = port.prefixLength;
+        obj[QLatin1String("netmask")]      = port.netmask;
+        obj[QLatin1String("gateway")]      = port.gateway;
+        obj[QLatin1String("dns")]          = QJsonArray::fromStringList(port.dns);
+        obj[QLatin1String("rxBytes")]      = port.rxBytes;
+        obj[QLatin1String("txBytes")]      = port.txBytes;
+        ports.append(obj);
+    }
+
+    QJsonObject resp;
+    resp[QLatin1String("ports")] = ports;
     return QHttpServerResponse(resp);
 }
 

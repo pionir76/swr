@@ -53,6 +53,7 @@
 | GET | `/api/config` | `handleGetConfig` |
 | GET | `/api/system/info` | `handleGetSystemInfo` |
 | GET | `/api/system/resources` | `handleGetSystemResources` |
+| GET | `/api/system/network` | `handleGetSystemNetwork` |
 
 ### RequiredRole::ManagerOrAbove — Manager 또는 Admin
 
@@ -74,7 +75,7 @@
 | GET | `/api/users/security-policy` | `handleGetSecurityPolicy` |
 | PUT | `/api/users/security-policy` | `handlePutSecurityPolicy` |
 | POST | `/api/config/reset` | `handlePostConfigReset` |
-| PUT | `/api/config/network` | `handlePutConfigNetwork` |
+| PUT | `/api/config/network` | `handlePutConfigNetwork` (폐지, 항상 410) |
 | PUT | `/api/config/serial` | `handlePutConfigSerial` |
 | PUT | `/api/config/system` | `handlePutConfigSystem` |
 | PUT | `/api/config/modbus-server` | `handlePutConfigModbusServer` |

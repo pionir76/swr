@@ -102,7 +102,7 @@ add_executable(swr
   data_collection/comm/pclink/PcLinkSumTCPClient.h data_collection/comm/pclink/PcLinkSumTCPClient.cpp
   config/AppConfig.h config/AppConfig.cpp
   config/SystemConfig.h config/SystemConfig.cpp
-  utils/NetworkConfigurator.h utils/NetworkConfigurator.cpp
+  utils/NetworkPorts.h utils/NetworkPorts.cpp
   modbus_server/ModbusTcpServer.h modbus_server/ModbusTcpServer.cpp
   maintenance/BackupModels.h
   maintenance/BackupManager.h maintenance/BackupManager.cpp

@@ -26,7 +26,7 @@ SmartRoute 웹 UI의 유지보수/대시보드 화면에서 CPU, 메모리, 디�
 | 메모리 사용률 % | `/proc/meminfo` | MemTotal - MemAvailable |
 | 스왑 사용률 % | `/proc/meminfo` | SwapTotal - SwapFree |
 | 디스크 사용률 % | `statvfs()` | `/`, `/var` 마운트 포인트 |
-| 네트워크 rx/tx | `/proc/net/dev` | eth0, eth1 |
+| 네트워크 rx/tx | `/proc/net/dev` | eth0(서비스 포트), eth1(필드 포트) |
 | 시스템 업타임 | `/proc/uptime` | 초 단위 |
 
 ---
@@ -203,7 +203,11 @@ CPU% = (busyCur - busyPrev) / (totalCur - totalPrev) × 100
 
 ## 9. 네트워크 인터페이스
 
-현재 감시 대상: `eth0` (현장), `eth1` (서비스)
+현재 감시 대상: `eth1` (필드 포트, 위쪽 RJ45), `eth0` (서비스 포트, 아래쪽 RJ45)
+
+리눅스 이름은 커널 프로브 순서라 위아래와 반대다. 포트별 상태(주소, 링크, 속도, 트래픽)는
+`GET /api/system/network`가 이름이 아니라 보드 위치(플랫폼 장치 `2188000.ethernet` = 필드,
+`20b4000.ethernet` = 서비스)로 찾아서 돌려준다(`utils/NetworkPorts.cpp`).
 
 `/proc/net/dev` 파싱:
 

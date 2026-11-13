@@ -13,17 +13,6 @@ struct Rs485Config {
     int     stopBits = 1;
 };
 
-struct NetInterfaceConfig {
-    QString name;
-    QString role;
-    bool    enabled   = true;
-    QString mode      = QStringLiteral("static");
-    QString ipAddress;
-    QString netmask;
-    QString gateway;
-    QString dns;
-};
-
 struct SysSettings {
     QString hostname  = QStringLiteral("smartroute");
     QString ntpServer = QStringLiteral("pool.ntp.org");
@@ -63,8 +52,10 @@ struct HmiConfig {
     int maxScreens = 50;
 };
 
+// Ethernet ports are not configured here: the OS image fixes their addresses
+// (see utils/NetworkPorts.h). Old config files may still have a "network"
+// section; it is ignored and dropped on the next save.
 struct AppConfig {
-    QList<NetInterfaceConfig> networkInterfaces;
     Rs485Config               rs485;
     SysSettings               system;
     ModbusServerConfig        modbusServer;

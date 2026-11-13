@@ -128,20 +128,6 @@ QByteArray BackupManager::buildConfig()
 {
     const AppConfig &cfg = SystemConfig::config();
 
-    QJsonArray ifaces;
-    for (const NetInterfaceConfig &iface : cfg.networkInterfaces) {
-        QJsonObject obj;
-        obj[QLatin1String("name")]      = iface.name;
-        obj[QLatin1String("role")]      = iface.role;
-        obj[QLatin1String("enabled")]   = iface.enabled;
-        obj[QLatin1String("mode")]      = iface.mode;
-        obj[QLatin1String("ipAddress")] = iface.ipAddress;
-        obj[QLatin1String("netmask")]   = iface.netmask;
-        obj[QLatin1String("gateway")]   = iface.gateway;
-        obj[QLatin1String("dns")]       = iface.dns;
-        ifaces.append(obj);
-    }
-
     QJsonObject serial;
     serial[QLatin1String("device")]   = cfg.rs485.device;
     serial[QLatin1String("baudRate")] = cfg.rs485.baudRate;
@@ -165,7 +151,6 @@ QByteArray BackupManager::buildConfig()
     ls[QLatin1String("autoLogout")]            = cfg.loginSecurity.autoLogout;
 
     QJsonObject root;
-    root[QLatin1String("network")]        = QJsonObject{{QLatin1String("interfaces"), ifaces}};
     root[QLatin1String("serial")]         = serial;
     root[QLatin1String("system")]         = sys;
     root[QLatin1String("modbus_server")]  = mbs;

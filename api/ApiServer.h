@@ -114,6 +114,7 @@ private:
     QHttpServerResponse handlePostFactoryReset(const QHttpServerRequest &request);
 
     // System Resources
+    QHttpServerResponse handleGetSystemNetwork(const QHttpServerRequest &request);
     QHttpServerResponse handleGetSystemResources(const QHttpServerRequest &request);
 
     // System Time

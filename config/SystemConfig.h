@@ -12,7 +12,6 @@ void init(const AppConfig &cfg);
 // Section Loader.
 const AppConfig             &config();
 const Rs485Config           &rs485();
-const QList<NetInterfaceConfig> &networkInterfaces();
 const SysSettings           &system();
 
 } // namespace SystemConfig

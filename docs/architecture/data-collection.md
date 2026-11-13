@@ -21,8 +21,10 @@ swr/
   utils/                          ← 공통 유틸리티
     Logger.h
     Logger.cpp
-    NetworkConfigurator.h
-    NetworkConfigurator.cpp
+    SystemMonitor.h
+    SystemMonitor.cpp
+    NetworkPorts.h                ← 필드·서비스 포트 상태 (읽기 전용)
+    NetworkPorts.cpp
   api/                            ← 앱 인터페이스 계층 (Web UI ↔ Qt App)
     ApiServer.h
     ApiServer.cpp
@@ -75,7 +77,7 @@ swr/
 ### 0) `config/`  _(앱 설정 계층)_
 
 - `config.json` 파일(경로: `SR_CONFIG_FILE`)을 파싱하여 `AppConfig` 구조체를 반환한다.
-- 네트워크 인터페이스(eth0/eth1), RS485 설정, 시스템 설정(hostname, NTP)을 담는다.
+- RS485 설정, 시스템 설정(hostname, NTP) 등을 담는다. 이더넷 포트 주소는 OS 이미지가 고정하므로 담지 않는다(필드 포트 192.168.0.150, 서비스 포트 192.168.1.150).
 - `SystemConfig` 싱글턴을 통해 앱 전역에서 설정값을 조회한다.
 - `factoryReset()` 으로 config 파일이 없을 때 기본값 파일을 생성한다.
 
@@ -125,13 +127,13 @@ swr/
 | 사용자 | PUT | `/api/users/security-policy` |
 | 시스템 설정 | GET | `/api/config` |
 | 시스템 설정 | POST | `/api/config/reset` |
-| 시스템 설정 | PUT | `/api/config/network` |
 | 시스템 설정 | PUT | `/api/config/serial` |
 | 시스템 설정 | PUT | `/api/config/system` |
 | 시스템 설정 | PUT | `/api/config/modbus-server` |
 | 시스템 | POST | `/api/system/restart` |
 | 시스템 | GET | `/api/system/info` |
 | 시스템 | GET | `/api/system/resources` |
+| 시스템 | GET | `/api/system/network` |
 | 유지보수 | GET | `/api/maintenance/backup` |
 | 유지보수 | POST | `/api/maintenance/restore/validate` |
 | 유지보수 | POST | `/api/maintenance/restore/apply` |

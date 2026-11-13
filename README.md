@@ -38,8 +38,8 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 | 메모리 | 512 MB DRAM |
 | 스토리지 | eMMC |
 | OS | Embedded Linux |
-| 통신 포트 | RS485 × 1, Ethernet × 2 (내부 스위칭 허브) |
-| 기본 IP | eth0 `192.168.0.150` / eth1 `192.168.0.151` |
+| 통신 포트 | RS485 × 1, Ethernet × 2 (독립 포트) |
+| 기본 IP | 필드 포트(위쪽 RJ45) `192.168.0.150/24` / 서비스 포트(아래쪽 RJ45) `192.168.1.150/24` — OS 이미지 고정, 앱에서 변경 불가 |
 
 ---
 
@@ -126,7 +126,8 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 - CPU 사용률, 온도, 로드 에버리지
 - 메모리 / 스왑 사용량
 - 디스크 사용률 (`/`, `/var`)
-- 네트워크 rx/tx (eth0, eth1)
+- 네트워크 rx/tx (필드 포트 eth1, 서비스 포트 eth0)
+- 이더넷 포트 상태 (주소, 링크, 속도, 트래픽 — `GET /api/system/network`)
 - 시스템 업타임
 - 3초 주기 백그라운드 샘플링, API는 캐시 즉시 반환
 
@@ -194,7 +195,7 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 |---|---|---|
 | GET | `/api/config` | 전체 설정 조회 |
 | POST | `/api/config/reset` | 설정 초기화 |
-| PUT | `/api/config/network` | 네트워크 설정 변경 |
+| PUT | `/api/config/network` | 폐지 — 410 (포트 주소는 OS 이미지 고정) |
 | PUT | `/api/config/serial` | RS485 설정 변경 |
 | PUT | `/api/config/system` | 시스템 설정 변경 |
 | PUT | `/api/config/modbus-server` | Modbus TCP 서버 설정 변경 |
@@ -205,6 +206,7 @@ SmartRoute는 현장의 다양한 범용 장비(PLC, 인버터, 센서 등)에 R
 |---|---|---|
 | GET | `/api/system/info` | 시스템 정보 + 요약 |
 | GET | `/api/system/resources` | 리소스 모니터링 (CPU/메모리/디스크/네트워크) |
+| GET | `/api/system/network` | 이더넷 포트 상태 (필드 포트·서비스 포트) |
 | POST | `/api/system/restart` | 애플리케이션 재시작 |
 | GET | `/api/system/time` | 현재 시각 / NTP 상태 / 타임존 조회 |
 | PUT | `/api/system/ntp` | NTP 활성화 / 비활성화 |
@@ -298,7 +300,7 @@ swr/
 ├── utils/                      # 공통 유틸리티
 │   ├── Logger.h/.cpp           # 비동기 SQLite 로거
 │   ├── SystemMonitor.h/.cpp    # 시스템 리소스 모니터링
-│   └── NetworkConfigurator.h/.cpp
+│   └── NetworkPorts.h/.cpp     # 필드·서비스 포트 상태 읽기 (보드 위치로 판별)
 └── scripts/                    # 빌드/배포 스크립트
     ├── redeploy.sh             # 빌드 + 배포 + 서비스 재시작
     └── deploy.sh
