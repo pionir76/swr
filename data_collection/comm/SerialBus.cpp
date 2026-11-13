@@ -66,6 +66,23 @@ QByteArray SerialBus::readAll()
     return m_port.readAll();
 }
 
+QByteArray SerialBus::readUntilSilence(int silenceMs, int maxMs)
+{
+    // The maxMs cap matters on a busy bus (a second master, line noise):
+    // silence may never come, and without the cap the polling thread never returns.
+    QByteArray data;
+    QElapsedTimer elapsed;
+    elapsed.start();
+
+    for (;;) {
+        const int remaining = maxMs - static_cast<int>(elapsed.elapsed());
+        if (remaining <= 0 || !m_port.waitForReadyRead(qMin(silenceMs, remaining)))
+            break;
+        data.append(m_port.readAll());
+    }
+    return data;
+}
+
 QString SerialBus::errorString() const
 {
     return m_port.errorString();

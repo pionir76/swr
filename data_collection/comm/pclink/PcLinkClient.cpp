@@ -191,8 +191,7 @@ bool PcLinkClient::sendRequest(const QByteArray &request,
     }
 
     response = m_bus.readAll();
-    while (m_bus.waitForReadyRead(50))
-        response.append(m_bus.readAll());
+    response.append(m_bus.readUntilSilence(50, m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000));
 
     return true;
 }

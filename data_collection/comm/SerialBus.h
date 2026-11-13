@@ -23,6 +23,8 @@ public:
     bool       waitForBytesWritten(int timeoutMs);
     bool       waitForReadyRead(int timeoutMs);
     QByteArray readAll();
+    // Reads until silenceMs pass with no new data, but for at most maxMs in total.
+    QByteArray readUntilSilence(int silenceMs, int maxMs);
     QString    errorString() const;
 
     // Modbus RTU needs a silent interval between frames on the shared bus.

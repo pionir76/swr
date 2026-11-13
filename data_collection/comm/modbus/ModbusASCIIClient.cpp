@@ -231,9 +231,7 @@ bool ModbusASCIIClient::sendRequest(const QByteArray &request,
     }
 
     QByteArray response = m_bus.readAll();
-    while (m_bus.waitForReadyRead(200)){
-        response.append(m_bus.readAll());
-    }
+    response.append(m_bus.readUntilSilence(200, m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000));
 
     return parseAsciiFrame(response, responsePdu, error);
 }

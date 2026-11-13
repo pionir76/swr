@@ -299,10 +299,8 @@ bool ModbusRTUClient::sendRequest(const QByteArray &request,
         response.append(m_bus.readAll());
     }
 
-    if (frameLength() < 0) {
-        while (m_bus.waitForReadyRead(200))
-            response.append(m_bus.readAll());
-    }
+    if (frameLength() < 0)
+        response.append(m_bus.readUntilSilence(200, timeoutMs - static_cast<int>(elapsed.elapsed())));
 
     m_bus.markIdle();
     return true;
