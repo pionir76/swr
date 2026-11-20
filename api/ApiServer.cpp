@@ -566,6 +566,26 @@ QHttpServerResponse ApiServer::handleSession(const QHttpServerRequest &request)
 // ---------------------------------------------------------------------------
 // Dashboard — unified snapshot for the dashboard page
 // ---------------------------------------------------------------------------
+// Raw words of a register as read from the device, already in word order
+// (high word first; byteOrder was applied when the value was collected).
+// Coils and discrete inputs give one 0/1 entry per bit. null until a value arrives.
+static QJsonValue rawWordsJson(const Model::RegisterState &r)
+{
+    if (!r.lastUpdated.isValid())
+        return QJsonValue();
+
+    QJsonArray words;
+    if (r.config.type == Model::RegisterType::Coil ||
+        r.config.type == Model::RegisterType::DiscreteInput) {
+        for (bool bit : r.rawCoils)
+            words.append(bit ? 1 : 0);
+    } else {
+        for (quint16 w : r.rawRegisters)
+            words.append(static_cast<int>(w));
+    }
+    return words.isEmpty() ? QJsonValue() : QJsonValue(words);
+}
+
 QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &request)
 {
     if (auto err = requireAuth(request)) return std::move(*err);
@@ -656,6 +676,11 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         obj["scaledValue"]  = r.scaledValue;
         obj["scale"]        = r.config.scale;
         obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
+        obj["rawWords"]     = rawWordsJson(r);
+        obj["isSigned"]     = r.config.isSigned;
+        obj["length"]       = r.config.length;
+        obj["minValue"]     = r.config.minValue;
+        obj["maxValue"]     = r.config.maxValue;
         obj["bitLabels"]    = r.config.bitLabels;
         obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
@@ -1356,6 +1381,9 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
         obj["maxValue"]     = r.config.maxValue;
         obj["scale"]        = r.config.scale;
         obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
+        obj["rawWords"]     = rawWordsJson(r);
+        obj["isSigned"]     = r.config.isSigned;
+        obj["length"]       = r.config.length;
         obj["bitLabels"]    = r.config.bitLabels;
         obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
