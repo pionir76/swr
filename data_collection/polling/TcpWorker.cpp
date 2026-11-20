@@ -31,7 +31,7 @@ void TcpWorker::run()
     Processor::DataCollector collector(m_device, m_deviceList, std::move(client));
     int    consecutiveErrors = 0;
     qint64 prevPollStart     = 0;
-    Model::DeviceInfo::Status::State prevState = Model::DeviceInfo::Status::State::Unknown;
+    bool   alarmRaised       = false;
 
     if (m_device.registers.isEmpty())
         return;
@@ -92,19 +92,17 @@ void TcpWorker::run()
 
         m_deviceList->updateStatus(m_device.id, status);
 
-        // ── 상태 전환 감지 → 경보 기록 ────────────────────────────────────
-        if (prevState != status.state) {
-            if (status.state == Model::DeviceInfo::Status::State::Error) {
-                Util::Logger::warning(
-                    QStringLiteral("[경보] %1 통신 불능: %2")
-                        .arg(m_device.name, lastError));
-            } else if (status.state == Model::DeviceInfo::Status::State::Ok &&
-                       prevState     == Model::DeviceInfo::Status::State::Error) {
-                Util::Logger::info(
-                    QStringLiteral("[복구] %1 통신 정상화")
-                        .arg(m_device.name));
-            }
-            prevState = status.state;
+        // ── 연속 실패 kCommAlarmAfterFailures회 → 경보, 경보 후 성공 → 복구 기록 ──
+        if (!alarmRaised && consecutiveErrors >= Model::kCommAlarmAfterFailures) {
+            Util::Logger::warning(
+                QStringLiteral("[경보] %1 통신 불능 (연속 %2회): %3")
+                    .arg(m_device.name).arg(consecutiveErrors).arg(lastError));
+            alarmRaised = true;
+        } else if (alarmRaised && allOk) {
+            Util::Logger::info(
+                QStringLiteral("[복구] %1 통신 정상화")
+                    .arg(m_device.name));
+            alarmRaised = false;
         }
 
         collector.flushWrites();

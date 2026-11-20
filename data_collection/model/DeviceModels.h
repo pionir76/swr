@@ -131,6 +131,12 @@ struct DeviceInfo {
     } status;
 };
 
+// A communication-loss alarm is logged only after this many poll cycles in a
+// row have failed. Single misses (about 0.1% of polls on the RS-485 bus) recover
+// on the next cycle and would otherwise flood the alerts and the system log.
+// Device status (state, consecutiveErrors) still changes on every cycle.
+inline constexpr int kCommAlarmAfterFailures = 3;
+
 enum class UserRole {
     User,
     Manager,

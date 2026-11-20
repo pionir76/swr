@@ -3193,9 +3193,10 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
                                                      ? Model::computeQuality(state, now)
                                                      : Model::DataQuality::Disabled;
 
-        // A register with no entry yet comes back default-constructed (isValid = true, value 0),
-        // so also require that a value was actually received.
-        const bool hasValue = state.isValid && state.lastUpdated.isValid();
+        // A register with no entry yet comes back default-constructed (value 0, no lastUpdated),
+        // so require that a value was actually received. A failed poll keeps the last value
+        // (isValid = false); q decides when it is too old, so one missed cycle does not blank it.
+        const bool hasValue = state.lastUpdated.isValid();
 
         // raw: the word read from the device, unscaled and unsigned (coils 0/1).
         // null when there is no usable value (bad, disabled, nothing received yet).

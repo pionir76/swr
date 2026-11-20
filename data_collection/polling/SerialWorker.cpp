@@ -45,13 +45,13 @@ void SerialWorker::run()
     QVector<qint64> lastPollMs;
     QVector<qint64> prevPollMs;
     QVector<int>    consecutiveErrors;
-    QVector<Model::DeviceInfo::Status::State> prevStates;
+    QVector<bool>   alarmRaised;
 
     collectors.reserve(m_devices.size());
     lastPollMs.reserve(m_devices.size());
     prevPollMs.reserve(m_devices.size());
     consecutiveErrors.reserve(m_devices.size());
-    prevStates.reserve(m_devices.size());
+    alarmRaised.reserve(m_devices.size());
 
     for (const Model::DeviceInfo &device : m_devices) {
         auto client = Comm::createDeviceClient(device.connection, &bus);
@@ -66,7 +66,7 @@ void SerialWorker::run()
         lastPollMs.append(0);
         prevPollMs.append(0);
         consecutiveErrors.append(0);
-        prevStates.append(Model::DeviceInfo::Status::State::Unknown);
+        alarmRaised.append(false);
     }
 
     while (m_running) {
@@ -152,18 +152,17 @@ void SerialWorker::run()
             m_deviceList->updateStatus(m_devices[i].id, status);
 
             //-----------------------------------------------------------//
-            // Detect state transitions and log warnings or info messages
+            // Log the alarm after kCommAlarmAfterFailures failed cycles in a
+            // row, and the recovery only for an alarm that was logged
             //-----------------------------------------------------------//
-            if (prevStates[i] != status.state) {
-                if (status.state == Model::DeviceInfo::Status::State::Error) {
-                    Util::Logger::warning(QStringLiteral("[경보] %1 통신 불능: %2")
-                            .arg(m_devices[i].name, lastError));
-                } else if (status.state == Model::DeviceInfo::Status::State::Ok &&
-                           prevStates[i] == Model::DeviceInfo::Status::State::Error) {
-                    Util::Logger::info(QStringLiteral("[복구] %1 통신 정상화")
-                            .arg(m_devices[i].name));
-                }
-                prevStates[i] = status.state;
+            if (!alarmRaised[i] && consecutiveErrors[i] >= Model::kCommAlarmAfterFailures) {
+                Util::Logger::warning(QStringLiteral("[경보] %1 통신 불능 (연속 %2회): %3")
+                        .arg(m_devices[i].name).arg(consecutiveErrors[i]).arg(lastError));
+                alarmRaised[i] = true;
+            } else if (alarmRaised[i] && allOk) {
+                Util::Logger::info(QStringLiteral("[복구] %1 통신 정상화")
+                        .arg(m_devices[i].name));
+                alarmRaised[i] = false;
             }
         }
 
