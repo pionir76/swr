@@ -28,12 +28,16 @@ public:
     QString    errorString() const;
 
     // Modbus RTU needs a silent interval between frames on the shared bus.
-    void       markIdle();                  // a request/response exchange just ended
-    void       waitForIdle(int minGapMs);   // block until the bus has been quiet for minGapMs
+    // peer identifies who just used the bus, so a client can tell whether
+    // the previous exchange was with another slave.
+    void        markIdle(const void *peer);  // a request/response exchange just ended
+    void        waitForIdle(int minGapMs);   // block until the bus has been quiet for minGapMs
+    const void *lastPeer() const { return m_lastPeer; }
 
 private:
     QSerialPort   m_port;
     QElapsedTimer m_idleSince;
+    const void   *m_lastPeer = nullptr;
 };
 
 } // namespace Comm

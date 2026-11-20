@@ -2,7 +2,8 @@
 
 #include <QElapsedTimer>
 
-static constexpr int kInterFrameGapMs = 20;
+static constexpr int kInterFrameGapMs  = 20;   // next frame to the same slave
+static constexpr int kSlaveChangeGapMs = 100;  // first frame to a slave after another slave's exchange
 
 namespace DataCollection {
 namespace Comm {
@@ -242,21 +243,24 @@ bool ModbusRTUClient::sendRequest(const QByteArray &request,
     //-----------------------------------------------------------//
     // Back-to-back frames (sent 0ms after the previous response) were
     // missed by some slaves, so keep a short silent gap between frames.
+    // NOVA ST570 still missed about 0.1% of the first requests sent 20ms
+    // after another slave's response (never its later requests), so the
+    // gap is longer when the bus changes hands.
     //-----------------------------------------------------------//
-    m_bus.waitForIdle(kInterFrameGapMs);
+    m_bus.waitForIdle(m_bus.lastPeer() == this ? kInterFrameGapMs : kSlaveChangeGapMs);
     m_bus.clearBuffers();
 
     const qint64 written = m_bus.write(request);
     if (written != request.size() ||
         !m_bus.waitForBytesWritten(m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 1000)) {
-        m_bus.markIdle();
+        m_bus.markIdle(this);
         m_lastError = QStringLiteral("RTU write failed: %1").arg(m_bus.errorString());
         error = m_lastError;
         return false;
     }
 
     if (!m_bus.waitForReadyRead(m_connection.timeoutMs > 0 ? m_connection.timeoutMs : 3000)) {
-        m_bus.markIdle();
+        m_bus.markIdle(this);
         m_lastError = QStringLiteral("RTU timeout waiting for response");
         error = m_lastError;
         return false;
@@ -302,7 +306,7 @@ bool ModbusRTUClient::sendRequest(const QByteArray &request,
     if (frameLength() < 0)
         response.append(m_bus.readUntilSilence(200, timeoutMs - static_cast<int>(elapsed.elapsed())));
 
-    m_bus.markIdle();
+    m_bus.markIdle(this);
     return true;
 }
 

@@ -88,9 +88,10 @@ QString SerialBus::errorString() const
     return m_port.errorString();
 }
 
-void SerialBus::markIdle()
+void SerialBus::markIdle(const void *peer)
 {
     m_idleSince.start();
+    m_lastPeer = peer;
 }
 
 void SerialBus::waitForIdle(int minGapMs)
