@@ -13,14 +13,17 @@ class BackupManager
 public:
     static QByteArray create(const DataCollection::Database::DeviceDatabase *db, QString &error);
 
+    // hmi.json of the backup (project, screens, tags by unifiedAddress); also the
+    // "hmi" part of GET /api/hmi/export. Null on error.
+    static QByteArray buildHmi(const DataCollection::Database::DeviceDatabase *db,
+                               QString &error);
+
 private:
     static QByteArray buildManifest();
     static QByteArray buildConfig();
     static QByteArray buildDevices(const DataCollection::Database::DeviceDatabase *db, QString &error);
     static QByteArray buildRegisters(const DataCollection::Database::DeviceDatabase *db, QString &error);
     static QByteArray buildUsers(const DataCollection::Database::DeviceDatabase *db, QString &error);
-    static QByteArray buildHmi(const DataCollection::Database::DeviceDatabase *db,
-                               QString &error);
     static QByteArray buildChecksum(const QMap<QString, QByteArray> &files);
 };
 

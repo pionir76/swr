@@ -294,6 +294,7 @@ QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabas
                                              ? QJsonValue(QJsonValue::Null)
                                              : QJsonValue(project.startScreen);
     proj[QLatin1String("revision")]    = project.revision;
+    proj[QLatin1String("pollMs")]      = project.pollMs;
 
     QJsonArray screenArr;
     for (const HmiScreen &s : screens) {

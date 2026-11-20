@@ -22,6 +22,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QMutexLocker>
+#include <QSet>
 #include <QUuid>
 #include <QUrlQuery>
 #include <QRegularExpression>
@@ -244,6 +245,12 @@ void ApiServer::setupRoutes()
                    [this](const QHttpServerRequest &req) { return handlePutHmiProject(req); });
     m_server.route("/api/hmi/screens", QHttpServerRequest::Method::Post,
                    [this](const QHttpServerRequest &req) { return handlePostHmiScreen(req); });
+    m_server.route("/api/hmi/export", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &req) { return handleGetHmiExport(req); });
+    m_server.route("/api/hmi/import/validate", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostHmiImport(req, false); });
+    m_server.route("/api/hmi/import/apply", QHttpServerRequest::Method::Post,
+                   [this](const QHttpServerRequest &req) { return handlePostHmiImport(req, true); });
     m_server.route("/api/hmi/screens/<arg>", QHttpServerRequest::Method::Get,
                    [this](const QString &id, const QHttpServerRequest &req) { return handleGetHmiScreen(req, id); });
     m_server.route("/api/hmi/screens/<arg>", QHttpServerRequest::Method::Put,
@@ -3480,6 +3487,7 @@ QHttpServerResponse ApiServer::handleGetHmiProject(const QHttpServerRequest &req
     resp[QLatin1String("startScreen")] = hmiStartScreenValue(project.startScreen);
     resp[QLatin1String("screens")]     = arr;
     resp[QLatin1String("revision")]    = project.revision;
+    resp[QLatin1String("pollMs")]      = project.pollMs;
     return QHttpServerResponse(resp);
 }
 
@@ -3512,6 +3520,19 @@ QHttpServerResponse ApiServer::handlePutHmiProject(const QHttpServerRequest &req
         const QJsonValue v = body.value(QLatin1String("startScreen"));
         update.hasStartScreen = true;
         update.startScreen    = v.isNull() ? QString() : v.toString();
+    }
+
+    if (body.contains(QLatin1String("pollMs"))) {
+        const QJsonValue v = body.value(QLatin1String("pollMs"));
+        const double d = v.toDouble(-1.0);
+        if (!v.isDouble() || d != std::floor(d) ||
+            d < Model::kHmiPollMsMin || d > Model::kHmiPollMsMax)
+            return hmiError(QStringLiteral("'pollMs' must be an integer %1–%2")
+                                .arg(Model::kHmiPollMsMin).arg(Model::kHmiPollMsMax),
+                            QHttpServerResponse::StatusCode::BadRequest);
+
+        update.hasPollMs = true;
+        update.pollMs    = static_cast<int>(d);
     }
 
     if (body.contains(QLatin1String("order"))) {
@@ -3555,6 +3576,7 @@ QHttpServerResponse ApiServer::handlePutHmiProject(const QHttpServerRequest &req
     QJsonObject resp;
     resp[QLatin1String("ok")]       = true;
     resp[QLatin1String("revision")] = result.revision;
+    resp[QLatin1String("pollMs")]   = result.pollMs;
     return QHttpServerResponse(resp);
 }
 
@@ -3762,6 +3784,320 @@ QHttpServerResponse ApiServer::handleDeleteHmiScreen(const QHttpServerRequest &r
     resp[QLatin1String("ok")]              = true;
     resp[QLatin1String("projectRevision")] = project.revision;
     resp[QLatin1String("startScreen")]     = hmiStartScreenValue(project.startScreen);
+    return QHttpServerResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// HMI export / import
+//
+// The file is the system backup's hmi.json wrapped with a small header:
+//   { "format": "swr.hmi", "schemaVersion": 1, "fileInfo": {...}, "hmi": {...} }
+// Import also accepts a bare hmi.json taken out of a system backup zip.
+// Validate and apply both take the whole file, so nothing is kept on the
+// server between the two calls and apply always checks against current state.
+// ---------------------------------------------------------------------------
+static constexpr int kHmiFileSchemaVersion = 1;
+
+namespace {
+
+struct HmiImportFile {
+    QJsonObject hmi;
+    QJsonValue  fileInfo;          // null for a bare hmi.json
+    QStringList warnings;
+    int         screenCount = 0;
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::Ok;
+    QString     error;
+};
+
+bool hmiImportFail(HmiImportFile &f, QHttpServerResponse::StatusCode code, const QString &msg)
+{
+    f.status = code;
+    f.error  = msg;
+    return false;
+}
+
+//-----------------------------------------------------------//
+// Structure checks only; tag-to-register linking is reported
+// separately because missing registers are skipped, not refused.
+//-----------------------------------------------------------//
+bool parseHmiImportFile(const QByteArray &body, int maxScreens, HmiImportFile &f)
+{
+    using Code = QHttpServerResponse::StatusCode;
+
+    QJsonParseError pe;
+    const QJsonDocument doc = QJsonDocument::fromJson(body, &pe);
+    if (!doc.isObject())
+        return hmiImportFail(f, Code::BadRequest,
+                             QStringLiteral("Body is not a JSON object (%1)").arg(pe.errorString()));
+
+    const QJsonObject root = doc.object();
+    if (root.contains(QLatin1String("format"))) {
+        if (root.value(QLatin1String("format")).toString() != QLatin1String("swr.hmi"))
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("'format' must be \"swr.hmi\""));
+        const int schema = root.value(QLatin1String("schemaVersion")).toInt(kHmiFileSchemaVersion);
+        if (schema > kHmiFileSchemaVersion)
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("'schemaVersion' %1 is newer than this device supports (%2)")
+                                     .arg(schema).arg(kHmiFileSchemaVersion));
+        if (!root.value(QLatin1String("hmi")).isObject())
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("'hmi' must be a JSON object"));
+        f.hmi      = root.value(QLatin1String("hmi")).toObject();
+        f.fileInfo = root.value(QLatin1String("fileInfo")).isObject()
+                         ? root.value(QLatin1String("fileInfo")) : QJsonValue(QJsonValue::Null);
+    } else if (root.contains(QLatin1String("project")) || root.contains(QLatin1String("screens")) ||
+               root.contains(QLatin1String("tags"))) {
+        f.hmi      = root;          // hmi.json from a system backup
+        f.fileInfo = QJsonValue(QJsonValue::Null);
+    } else {
+        return hmiImportFail(f, Code::BadRequest,
+                             QStringLiteral("Not an HMI file: expected \"format\": \"swr.hmi\" "
+                                            "or a system backup hmi.json"));
+    }
+
+    const QJsonValue pv = f.hmi.value(QLatin1String("project"));
+    const QJsonValue sv = f.hmi.value(QLatin1String("screens"));
+    const QJsonValue tv = f.hmi.value(QLatin1String("tags"));
+    if (!pv.isUndefined() && !pv.isObject())
+        return hmiImportFail(f, Code::BadRequest, QStringLiteral("'hmi.project' must be an object"));
+    if (!sv.isUndefined() && !sv.isArray())
+        return hmiImportFail(f, Code::BadRequest, QStringLiteral("'hmi.screens' must be an array"));
+    if (!tv.isUndefined() && !tv.isArray())
+        return hmiImportFail(f, Code::BadRequest, QStringLiteral("'hmi.tags' must be an array"));
+
+    // Older files have no pollMs (the default applies); a present value must be valid
+    const QJsonValue poll = pv.toObject().value(QLatin1String("pollMs"));
+    if (!poll.isUndefined() && !poll.isNull()) {
+        const double d = poll.toDouble(-1.0);
+        if (!poll.isDouble() || d != std::floor(d) ||
+            d < Model::kHmiPollMsMin || d > Model::kHmiPollMsMax)
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("'hmi.project.pollMs' must be an integer %1–%2")
+                                     .arg(Model::kHmiPollMsMin).arg(Model::kHmiPollMsMax));
+    }
+
+    const QJsonArray screens = sv.toArray();
+    if (screens.size() > maxScreens)
+        return hmiImportFail(f, Code::Conflict,
+                             QStringLiteral("too many screens: %1 (maxScreens %2)")
+                                 .arg(screens.size()).arg(maxScreens));
+
+    QSet<QString> screenIds;
+    for (const QJsonValue &v : screens) {
+        if (!v.isObject())
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("each screen must be an object"));
+        const QJsonObject s = v.toObject();
+        const QString id = s.value(QLatin1String("id")).toString();
+        if (!hmiIdValid(id))
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("screen id '%1' must be 1–64 characters: letters, digits, _ or -").arg(id));
+        if (screenIds.contains(id))
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("duplicate screen id '%1'").arg(id));
+        screenIds.insert(id);
+
+        if (s.value(QLatin1String("title")).toString().size() > kHmiTitleMaxLen)
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("screen '%1': 'title' must be at most %2 characters")
+                                     .arg(id).arg(kHmiTitleMaxLen));
+
+        QString compact, contentErr;
+        bool tooLarge = false;
+        if (!validateHmiContent(s.value(QLatin1String("content")), compact, tooLarge, contentErr))
+            return hmiImportFail(f, tooLarge ? Code::PayloadTooLarge : Code::BadRequest,
+                                 QStringLiteral("screen '%1': %2").arg(id, contentErr));
+    }
+    f.screenCount = screens.size();
+
+    QSet<QString> tagIds;
+    for (const QJsonValue &v : tv.toArray()) {
+        if (!v.isObject())
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("each tag must be an object"));
+        const QJsonObject t = v.toObject();
+        const QString id = t.value(QLatin1String("id")).toString();
+        if (!hmiIdValid(id))
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("tag id '%1' must be 1–64 characters: letters, digits, _ or -").arg(id));
+        if (tagIds.contains(id))
+            return hmiImportFail(f, Code::BadRequest, QStringLiteral("duplicate tag id '%1'").arg(id));
+        tagIds.insert(id);
+
+        const QString access = t.value(QLatin1String("access")).toString();
+        if (!access.isEmpty() && access != QLatin1String("r") && access != QLatin1String("rw"))
+            return hmiImportFail(f, Code::BadRequest,
+                                 QStringLiteral("tag '%1': 'access' must be \"r\", \"rw\" or absent").arg(id));
+    }
+
+    const QString start = pv.toObject().value(QLatin1String("startScreen")).toString();
+    if (!start.isEmpty() && !screenIds.contains(start))
+        f.warnings << QStringLiteral("Start screen '%1' is not in the file; the first screen will be used")
+                          .arg(start);
+    return true;
+}
+
+QString safeFilePart(const QString &s)
+{
+    QString out = s;
+    static const QRegularExpression kUnsafe(QStringLiteral("[^A-Za-z0-9_-]"));
+    out.replace(kUnsafe, QStringLiteral("_"));
+    return out.isEmpty() ? QStringLiteral("device") : out;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// GET /api/hmi/export
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handleGetHmiExport(const QHttpServerRequest &request)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    QString dbErr;
+    const QByteArray hmiJson = Maintenance::BackupManager::buildHmi(m_db, dbErr);
+    if (hmiJson.isNull())
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+
+    const QString   caller   = sessionUsername(request);
+    const QString   hostname = loadConfig(QStringLiteral(SR_CONFIG_FILE)).system.hostname;
+    const QDateTime now      = QDateTime::currentDateTime();
+
+    QJsonObject info;
+    info[QLatin1String("product")]   = QStringLiteral("SmartRoute");
+    info[QLatin1String("createdAt")] = now.toString(Qt::ISODate);
+    info[QLatin1String("createdBy")] = caller;
+    info[QLatin1String("hostname")]  = hostname;
+    info[QLatin1String("version")]   = QStringLiteral(SR_VERSION);
+    info[QLatin1String("revision")]  = QStringLiteral(SR_REVISION);
+
+    const QJsonObject hmi = QJsonDocument::fromJson(hmiJson).object();
+
+    QJsonObject root;
+    root[QLatin1String("format")]        = QStringLiteral("swr.hmi");
+    root[QLatin1String("schemaVersion")] = kHmiFileSchemaVersion;
+    root[QLatin1String("fileInfo")]      = info;
+    root[QLatin1String("hmi")]           = hmi;
+
+    QByteArray data = QJsonDocument(root).toJson(QJsonDocument::Indented);
+
+    Util::Logger::info(QStringLiteral("HMI exported by %1: %2 screen(s), %3 tag(s), %4 bytes")
+                           .arg(caller)
+                           .arg(hmi.value(QLatin1String("screens")).toArray().size())
+                           .arg(hmi.value(QLatin1String("tags")).toArray().size())
+                           .arg(data.size()));
+
+    const QString filename = QStringLiteral("swr_hmi_%1_%2.json")
+                                 .arg(safeFilePart(hostname),
+                                      now.toString(QStringLiteral("yyyyMMdd_HHmmss")));
+
+    QHttpServerResponse resp(QByteArrayLiteral("application/json"), std::move(data));
+    QHttpHeaders hdrs = resp.headers();
+    hdrs.append(QHttpHeaders::WellKnownHeader::ContentDisposition,
+                QStringLiteral("attachment; filename=\"%1\"").arg(filename));
+    resp.setHeaders(std::move(hdrs));
+    return resp;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hmi/import/validate   (apply = false)
+// POST /api/hmi/import/apply      (apply = true)
+//
+// Both take the whole file. Validate changes nothing; apply re-checks the
+// file and replaces the HMI project, screens and tags without a restart.
+// ---------------------------------------------------------------------------
+QHttpServerResponse ApiServer::handlePostHmiImport(const QHttpServerRequest &request, bool apply)
+{
+    if (auto err = requireAuth(request, RequiredRole::ManagerOrAbove)) return std::move(*err);
+
+    const int maxScreens = loadConfig(QStringLiteral(SR_CONFIG_FILE)).hmi.maxScreens;
+
+    HmiImportFile file;
+    if (!parseHmiImportFile(request.body(), maxScreens, file)) {
+        QJsonObject e;
+        e[QLatin1String("error")] = file.error;
+        if (file.status == QHttpServerResponse::StatusCode::Conflict)
+            e[QLatin1String("maxScreens")] = maxScreens;
+        return QHttpServerResponse(e, file.status);
+    }
+
+    //-----------------------------------------------------------//
+    // Tags link to registers by unifiedAddress
+    //-----------------------------------------------------------//
+    QString dbErr;
+    QSet<int> unifiedHere;
+    {
+        const QList<Model::DeviceInfo> devices = m_db->loadDevices(dbErr);
+        if (!dbErr.isEmpty())
+            return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+        for (const Model::DeviceInfo &d : devices)
+            for (const Model::RegisterConfig &r : d.registers)
+                if (r.unifiedAddress >= 0)
+                    unifiedHere.insert(r.unifiedAddress);
+    }
+
+    const QJsonArray tags = file.hmi.value(QLatin1String("tags")).toArray();
+    QJsonArray missing;
+    for (const QJsonValue &v : tags) {
+        const QJsonObject t     = v.toObject();
+        const QJsonValue  addr  = t.value(QLatin1String("unifiedAddress"));
+        if (addr.isDouble() && unifiedHere.contains(addr.toInt()))
+            continue;
+        QJsonObject m;
+        m[QLatin1String("id")]             = t.value(QLatin1String("id"));
+        m[QLatin1String("unifiedAddress")] = addr.isDouble() ? addr : QJsonValue(QJsonValue::Null);
+        missing.append(m);
+    }
+    const int linked = tags.size() - missing.size();
+
+    if (!apply) {
+        Model::HmiProject current;
+        QList<Model::HmiScreen> currentScreens;
+        if (!m_db->loadHmiProject(current, currentScreens, dbErr))
+            return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+        const int currentTags = m_db->loadHmiTags(dbErr).size();
+        if (!dbErr.isEmpty())
+            return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+
+        const QJsonObject proj = file.hmi.value(QLatin1String("project")).toObject();
+        QJsonObject project;
+        project[QLatin1String("name")]        = proj.value(QLatin1String("name")).toString();
+        project[QLatin1String("startScreen")] = hmiStartScreenValue(proj.value(QLatin1String("startScreen")).toString());
+        project[QLatin1String("pollMs")]      = proj.value(QLatin1String("pollMs")).toInt(Model::kHmiPollMsDefault);
+
+        QJsonObject tagInfo;
+        tagInfo[QLatin1String("total")]   = tags.size();
+        tagInfo[QLatin1String("linked")]  = linked;
+        tagInfo[QLatin1String("missing")] = missing;
+
+        QJsonObject cur;
+        cur[QLatin1String("screens")] = currentScreens.size();
+        cur[QLatin1String("tags")]    = currentTags;
+
+        QJsonObject resp;
+        resp[QLatin1String("fileInfo")] = file.fileInfo;
+        resp[QLatin1String("project")]  = project;
+        resp[QLatin1String("screens")]  = file.screenCount;
+        resp[QLatin1String("tags")]     = tagInfo;
+        resp[QLatin1String("current")]  = cur;
+        resp[QLatin1String("warnings")] = QJsonArray::fromStringList(file.warnings);
+        return QHttpServerResponse(resp);
+    }
+
+    QStringList warnings, skipped;
+    int revision = 0;
+    if (!m_db->importHmi(file.hmi, warnings, skipped, revision, dbErr))
+        return hmiError(dbErr, QHttpServerResponse::StatusCode::InternalServerError);
+
+    const QString caller = sessionUsername(request);
+    Util::Logger::info(QStringLiteral("HMI imported by %1: %2 screen(s), %3 tag(s) — previous HMI replaced")
+                           .arg(caller).arg(file.screenCount).arg(tags.size() - skipped.size()));
+    if (!skipped.isEmpty())
+        Util::Logger::warning(QStringLiteral("HMI import skipped %1 tag(s) with no register on this device: %2")
+                                  .arg(skipped.size()).arg(skipped.join(QStringLiteral(", "))));
+
+    QJsonObject resp;
+    resp[QLatin1String("ok")]          = true;
+    resp[QLatin1String("screens")]     = file.screenCount;
+    resp[QLatin1String("tags")]        = tags.size() - skipped.size();
+    resp[QLatin1String("skippedTags")] = QJsonArray::fromStringList(skipped);
+    resp[QLatin1String("revision")]    = revision;
     return QHttpServerResponse(resp);
 }
 

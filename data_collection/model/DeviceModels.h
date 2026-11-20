@@ -221,10 +221,16 @@ struct HmiScreen {
     QString updatedBy;
 };
 
+// HMI runtime value refresh period, stored for the frontend only
+inline constexpr int kHmiPollMsMin     = 500;
+inline constexpr int kHmiPollMsMax     = 10000;
+inline constexpr int kHmiPollMsDefault = 1000;
+
 struct HmiProject {
     QString name;
     QString startScreen;           // empty == null (only when no screens exist)
     int     revision = 0;
+    int     pollMs   = kHmiPollMsDefault;
 };
 
 // Partial update for PUT /api/hmi/project — only flagged fields are applied.
@@ -235,6 +241,8 @@ struct HmiProjectUpdate {
     QString     startScreen;       // empty == null
     bool        hasOrder       = false;
     QStringList order;
+    bool        hasPollMs      = false;
+    int         pollMs         = kHmiPollMsDefault;
     int         revision       = 0;
 };
 

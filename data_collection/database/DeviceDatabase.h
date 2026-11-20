@@ -4,6 +4,7 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSqlDatabase>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -103,10 +104,25 @@ public:
                      QStringList &hmiWarnings,
                      QString &error);
 
+    // HMI import — replaces the project, screens and tags (no restart).
+    // Tags whose unifiedAddress has no register here are skipped (ids in skippedTags).
+    // The project and every screen get a revision above any current one.
+    bool importHmi(const QJsonObject &hmi,
+                   QStringList &warnings,
+                   QStringList &skippedTags,
+                   int &projectRevision,
+                   QString &error);
+
     // Factory Reset
     bool factoryReset(QString &error);
 
 private:
+    bool replaceHmi(QSqlDatabase &db,
+                    const QJsonObject &hmi,
+                    int revisionFloor,
+                    QStringList &warnings,
+                    QStringList &skippedTags,
+                    QString &error);
 
     QString m_connectionName;
 };
