@@ -26,8 +26,6 @@ public:
     QList<Model::RegisterState> states() const;
 
 private:
-    double computeScaledValue(const Model::RegisterState &entry) const;
-
     mutable QMutex m_mutex;
     QHash<int, Model::RegisterState> m_states;
 

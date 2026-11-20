@@ -35,9 +35,7 @@ struct RegisterState {
     // Values for Run-time
     //----------------------------------------//
     QVector<quint16>    rawRegisters;
-    QVector<bool>       rawCoils;
-    double              scaledValue       = 0.0;
-    bool                outOfRange        = false;
+    QVector<bool>       rawCoils;          // raw values only; scale/sign are applied by the frontend
     QDateTime           lastUpdated;
     bool                isValid           = true;
     QString             errorMessage;

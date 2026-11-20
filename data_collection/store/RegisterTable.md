@@ -15,7 +15,7 @@ m_states: QHash<unifiedRegisterId, RegisterState>
 
 | 저장소 | 역할 |
 |--------|------|
-| `m_states` | 스케일 변환·범위검사까지 완료된 레지스터 상태 (rawRegisters/rawCoils 포함) |
+| `m_states` | 레지스터 상태: 원시값(rawRegisters/rawCoils), 마지막 갱신 시각, 오류 |
 
 > `unifiedRegisterId`는 DB INSERT 시 `DeviceDatabase::insertRegister`에서 확정된다. 런타임 ID 발급 로직 없음.
 > 원시값(raw)은 별도 테이블 없이 `RegisterState.rawRegisters` / `RegisterState.rawCoils` 에 직접 저장된다.
@@ -36,18 +36,12 @@ entry.config = config  ← RegisterConfig 전체 갱신 (초기화 및 폴링 �
     ├─ success == true
     │       ▼
     │   lastUpdated = 현재 시각
-    │   rawRegisters / rawCoils 저장
-    │       ▼
-    │   computeScaledValue()  ← 원시값 × scale → 물리값
-    │       ▼
-    │   outOfRange 판정 (scaledValue < min || > max)
-    │       ▼
-    │   clampValue()          ← 범위 초과 시 min/max 로 잘라냄
+    │   rawRegisters / rawCoils 저장 (byteOrder는 수집 단계에서 이미 적용)
     │
     └─ success == false
             ▼
         isValid=false, errorMessage 저장
-        lastUpdated/rawRegisters/rawCoils/scaledValue/outOfRange 는 직전 값 유지
+        lastUpdated/rawRegisters/rawCoils 는 직전 값 유지
         → lastUpdated 미갱신으로 elapsed 축적 → quality가 Normal → Bad로 전이
     │
     ▼
@@ -97,25 +91,9 @@ m_states[unifiedId] = entry  (저장 완료)
 
 ---
 
-## `computeScaledValue` — 원시값 → 물리값 변환
+## 원시값 원칙
 
-`config.type` 기준 `switch`로 코일/레지스터 경로를 명시적으로 분기합니다.
-
-### 레지스터 계열 (`HoldingRegister`, `InputRegister`, `WordRegister`)
-
-레지스터가 2개 이상이면 16비트씩 왼쪽으로 시프트하며 합쳐 32/64비트 정수로 만든 뒤 `scale`을 곱합니다.
-1개면 해당 값 × `scale`. `isSigned` 시 부호 확장 처리합니다.
-
-```
-예) rawRegisters = [0x0001, 0x86A0]
-combined = (0x0001 << 16) | 0x86A0 = 100000
-scaledValue = 100000 × 0.01 = 1000.0
-```
-
-### 코일 계열 (`Coil`, `DiscreteInput`, `BitRegister`)
-
-- 1개: `true` → `1.0 × scale`, `false` → `0.0`
-- 여러 개: `true` 개수 × `scale`
+서버는 배율(`scale`)·부호(`isSigned`)·범위(`minValue`/`maxValue`)를 계산하지 않습니다. API는 `rawWords`(상위 워드 먼저)와 레지스터 설정을 내려 주고, 물리값 계산과 범위 초과 표시는 프론트가 합니다(2026-11-20, 실시간 원본값 전환 3단계).
 
 ---
 
@@ -160,4 +138,4 @@ ModbusTcpServer
 
 ## 요약
 
-> **"폴링 원시값을 받아서 → unifiedRegisterId 키로 저장하고 → 스케일·범위를 적용해 → 스레드 안전하게 캐싱하는 인메모리 상태 테이블 — 외부 Modbus 마스터에게 Holding Register로 단일 노출"**
+> **"폴링 원시값을 받아서 → unifiedRegisterId 키로 저장하고 → 스레드 안전하게 캐싱하는 인메모리 상태 테이블 — 외부 Modbus 마스터에게 Holding Register로 단일 노출"**

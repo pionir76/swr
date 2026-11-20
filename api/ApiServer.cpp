@@ -680,7 +680,6 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         obj["localAddress"] = r.config.localAddress;
         obj["sourceType"]   = Model::registerTypeToString(r.config.type);
         obj["unit"]         = r.config.unit;
-        obj["scaledValue"]  = r.scaledValue;
         obj["scale"]        = r.config.scale;
         obj["rawWord"]      = r.rawRegisters.isEmpty() ? 0 : static_cast<int>(r.rawRegisters.first());
         obj["rawWords"]     = rawWordsJson(r);
@@ -691,7 +690,6 @@ QHttpServerResponse ApiServer::handleGetDashboard(const QHttpServerRequest &requ
         obj["bitLabels"]    = r.config.bitLabels;
         obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
-        obj["outOfRange"]   = r.outOfRange;
         obj["quality"]      = Model::dataQualityToString(quality);
         obj["lastUpdated"]  = r.lastUpdated.toString(Qt::ISODate);
         obj["errorMessage"] = r.errorMessage;
@@ -1383,7 +1381,6 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
         obj["localAddress"] = r.config.localAddress;
         obj["sourceType"]   = Model::registerTypeToString(r.config.type);
         obj["unit"]         = r.config.unit;
-        obj["scaledValue"]  = r.scaledValue;
         obj["minValue"]     = r.config.minValue;
         obj["maxValue"]     = r.config.maxValue;
         obj["scale"]        = r.config.scale;
@@ -1394,7 +1391,6 @@ QHttpServerResponse ApiServer::handleGetRealtime(const QHttpServerRequest &reque
         obj["bitLabels"]    = r.config.bitLabels;
         obj["readOnly"]     = r.config.readOnly;
         obj["isValid"]      = r.isValid;
-        obj["outOfRange"]   = r.outOfRange;
         obj["quality"]      = Model::dataQualityToString(quality);
         obj["lastUpdated"]  = r.lastUpdated.toString(Qt::ISODate);
         obj["errorMessage"] = r.errorMessage;
