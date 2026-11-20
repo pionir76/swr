@@ -1417,7 +1417,8 @@ QHttpServerResponse ApiServer::handleGetLogs(const QHttpServerRequest &request)
 
     const QUrlQuery query(request.query());
 
-    int limit = Util::Logger::maxLogRows();
+    // Without "limit", return at most 1000 rows, not the whole log (up to SR_MAX_LOG_LINES).
+    int limit = qMin(Util::Logger::maxLogRows(), 1000);
     if (query.hasQueryItem(QStringLiteral("limit"))) {
         bool ok = false;
         const int requested = query.queryItemValue(QStringLiteral("limit")).toInt(&ok);

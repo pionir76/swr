@@ -24,13 +24,14 @@ string(TIMESTAMP SR_LAST_UPDATE_DATE "%Y-%m-%d")   # cmake 실행 시 자동 설
 # ---------------------------------------------------------------------------
 set(SR_CONFIG_FILE       "/etc/swr/config.json"              CACHE STRING "Config file path")
 set(SR_DB_FILE           "/var/lib/swr/smartroute.db"        CACHE STRING "Database file path")
-set(SR_LOG_FILE          "/var/log/swr/smartroute_log.db"    CACHE STRING "Log database file path")
+# Keep the log DB on flash: /var/log is tmpfs on the device and loses it at power-off.
+set(SR_LOG_FILE          "/var/lib/swr/smartroute_log.db"    CACHE STRING "Log database file path")
 set(SR_RESTORE_TEMP_DIR  "/tmp/swr_restore"                  CACHE STRING "Restore temp directory")
 set(SR_TFILE_DIR         "/trend_data"                       CACHE STRING "Trend file storage directory")
 
 set(SR_ETH_DEV       "eth0"               CACHE STRING "Ethernet interface device")
 set(SR_LOG_PRINT     1                    CACHE STRING "Enable log print: 0 or 1")
-set(SR_MAX_LOG_LINES 1000                 CACHE STRING "Maximum log lines")
+set(SR_MAX_LOG_LINES 10000                CACHE STRING "Maximum log lines")
 set(SR_MAX_DEVICES   20                   CACHE STRING "Maximum devices")
 set(SR_API_PORT      8080                 CACHE STRING "Qt HTTP API port")
 

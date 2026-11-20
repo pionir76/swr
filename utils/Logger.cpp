@@ -120,9 +120,8 @@ void Logger::drain(QSqlDatabase &db)
         q.exec();
         ++m_rowCount;
     }
+    trimIfNeeded(db);  // same transaction: one flash sync per batch
     db.commit();
-
-    trimIfNeeded(db);
 }
 
 void Logger::trimIfNeeded(QSqlDatabase &db)
@@ -130,14 +129,15 @@ void Logger::trimIfNeeded(QSqlDatabase &db)
     if (m_rowCount <= m_maxLogRows)
         return;
 
+    // Delete by id threshold through the primary key; "NOT IN (... ORDER BY id
+    // DESC LIMIT n)" sorted every id on each batch once the table was full.
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "DELETE FROM logs WHERE id NOT IN "
-        "(SELECT id FROM logs ORDER BY id DESC LIMIT ?)"
+        "DELETE FROM logs WHERE id <= (SELECT MAX(id) FROM logs) - ?"
     ));
     q.addBindValue(m_maxLogRows);
     if (q.exec())
-        m_rowCount = m_maxLogRows;
+        m_rowCount = m_maxLogRows;  // ids are contiguous; an id gap only leaves fewer rows
 }
 
 // ── Public static API ─────────────────────────────────────────────────────────
