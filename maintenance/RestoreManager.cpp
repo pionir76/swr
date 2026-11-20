@@ -2,7 +2,6 @@
 #include "BackupManager.h"
 
 #include "../config/AppConfig.h"
-#include "../config/SystemConfig.h"
 #include "../data_collection/database/DeviceDatabase.h"
 #include "../data_collection/polling/PollingManager.h"
 #include "../utils/Logger.h"
@@ -153,7 +152,7 @@ RestorePreview RestoreManager::validate(const QByteArray &zipData, QString &erro
     //-----------------------------------------------------------//
     // 7. Check hostname mismatch
     //-----------------------------------------------------------//
-    const QString myHostname = SystemConfig::config().system.hostname;
+    const QString myHostname = loadConfig(QStringLiteral(SR_CONFIG_FILE)).system.hostname;
 
     if (preview.backupInfo.hostname != myHostname) {
         preview.warnings << QStringLiteral("Backup was created on '%1', current device is '%2'")
@@ -342,7 +341,9 @@ bool RestoreManager::apply(const QString &restoreId,
             const QJsonDocument doc = QJsonDocument::fromJson(configData);
             if (doc.isObject()) {
                 const QJsonObject root = doc.object();
-                AppConfig cfg = SystemConfig::config();  // 현재 설정 복사
+                // Start from the saved file, not the boot snapshot: sections the backup
+                // does not carry (trend, language, hmi) must keep their current values.
+                AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));
 
                 // system
                 const QJsonObject sys = root[QLatin1String("system")].toObject();

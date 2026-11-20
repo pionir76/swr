@@ -2,7 +2,6 @@
 #include "BackupModels.h"
 
 #include "../config/AppConfig.h"
-#include "../config/SystemConfig.h"
 #include "../data_collection/database/DeviceDatabase.h"
 #include "../data_collection/model/DeviceModels.h"
 
@@ -92,7 +91,7 @@ QByteArray BackupManager::create(const DataCollection::Database::DeviceDatabase 
 
 QByteArray BackupManager::buildManifest()
 {
-    const AppConfig &cfg = SystemConfig::config();
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));  // saved settings, not the boot snapshot
 
     BackupManifest m;
     m.createdAt               = QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -126,7 +125,7 @@ QByteArray BackupManager::buildManifest()
 
 QByteArray BackupManager::buildConfig()
 {
-    const AppConfig &cfg = SystemConfig::config();
+    const AppConfig cfg = loadConfig(QStringLiteral(SR_CONFIG_FILE));  // saved settings, not the boot snapshot
 
     QJsonObject serial;
     serial[QLatin1String("device")]   = cfg.rs485.device;
