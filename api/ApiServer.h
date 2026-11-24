@@ -133,6 +133,7 @@ private:
     QHttpServerResponse handleDeleteHmiTag(const QHttpServerRequest &request, const QString &id);
     QHttpServerResponse handleGetHmiValues(const QHttpServerRequest &request);
     QHttpServerResponse handlePostHmiWrite(const QHttpServerRequest &request);
+    QHttpServerResponse handlePostHmiEval(const QHttpServerRequest &request);
 
     // HMI Project / Screens
     QHttpServerResponse handleGetHmiProject(const QHttpServerRequest &request);

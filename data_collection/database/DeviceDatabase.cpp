@@ -11,9 +11,68 @@
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QMap>
+#include <QJsonArray>
+
+#include "../../hmi/HmiExpr.h"
 
 namespace DataCollection {
 namespace Database{
+
+//-----------------------------------------------------------//
+// hmi_tags definition, shared by initSchema and the migration that
+// rebuilds older tables (register_id was NOT NULL before computed tags).
+// register tags keep the cascade from registers; expr and param tags
+// have no register. param_* columns are reserved for HMI setting tags.
+//-----------------------------------------------------------//
+static QString hmiTagsTableSql(const QString &table)
+{
+    return QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS %1 ("
+        "  id          TEXT    PRIMARY KEY,"
+        "  name        TEXT    NOT NULL,"
+        "  kind        TEXT    NOT NULL DEFAULT 'register'"
+        "                      CHECK(kind IN ('register', 'expr', 'param')),"
+        "  register_id INTEGER REFERENCES registers(id) ON DELETE CASCADE,"
+        "  unit        TEXT,"
+        "  min_value   REAL,"
+        "  max_value   REAL,"
+        "  scale       REAL,"
+        "  access      TEXT    CHECK(access IS NULL OR access IN ('r', 'rw')),"
+        "  value_type  TEXT    CHECK(value_type IS NULL OR value_type IN ('bool', 'number', 'string')),"
+        "  expr        TEXT,"
+        "  param_init  TEXT,"
+        "  param_value TEXT,"
+        "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  CHECK((kind = 'register') = (register_id IS NOT NULL))"
+        ")").arg(table);
+}
+
+static const char kHmiTagColumns[] =
+    "id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at,"
+    "kind,value_type,expr";
+
+// Binds name, kind, register_id, unit, min, max, scale, access, value_type, expr.
+// register tags carry no value_type/expr; expr tags carry no register or overrides.
+static void bindHmiTagFields(QSqlQuery &q, const Model::HmiTag &tag)
+{
+    const QVariant nullText(QMetaType(QMetaType::QString));
+    const QVariant nullReal(QMetaType(QMetaType::Double));
+    const QVariant nullInt(QMetaType(QMetaType::Int));
+    const bool isRegister = tag.kind == QLatin1String("register");
+
+    q.addBindValue(tag.name);
+    q.addBindValue(tag.kind);
+    q.addBindValue(isRegister ? QVariant(tag.registerId) : nullInt);
+    q.addBindValue(tag.unit.isEmpty()              ? nullText : QVariant(tag.unit));
+    q.addBindValue(isRegister && tag.hasMin        ? QVariant(tag.minValue) : nullReal);
+    q.addBindValue(isRegister && tag.hasMax        ? QVariant(tag.maxValue) : nullReal);
+    q.addBindValue(isRegister && tag.hasScale      ? QVariant(tag.scale)    : nullReal);
+    q.addBindValue(isRegister && !tag.access.isEmpty() ? QVariant(tag.access) : nullText);
+    q.addBindValue(isRegister || tag.valueType.isEmpty() ? nullText : QVariant(tag.valueType));
+    q.addBindValue(isRegister || tag.expr.isEmpty()      ? nullText : QVariant(tag.expr));
+}
+
 
 DeviceDatabase::DeviceDatabase() : m_connectionName(QStringLiteral("smartroute_db"))
 {
@@ -170,6 +229,84 @@ bool DeviceDatabase::resetSchema(QString& error)
 }
 
 
+//-----------------------------------------------------------//
+// Tables made before computed tags have no "kind" column and a
+// NOT NULL register_id. SQLite cannot drop a NOT NULL constraint, so
+// the table is rebuilt once: every existing tag becomes a register tag.
+// Columns the new table does not have (the old "decimals") are dropped.
+//-----------------------------------------------------------//
+bool DeviceDatabase::migrateHmiTagKinds(QString &error)
+{
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+
+    bool hasKind = false;
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("PRAGMA table_info(hmi_tags)"))) {
+            error = q.lastError().text();
+            return false;
+        }
+        while (q.next())
+            if (q.value(1).toString() == QLatin1String("kind"))
+                hasKind = true;
+    }
+    if (hasKind)
+        return true;
+
+    // Foreign keys must be off while the table is dropped and renamed,
+    // and the pragma has no effect inside a transaction.
+    {
+        QSqlQuery q(db);
+        if (!q.exec(QStringLiteral("PRAGMA foreign_keys = OFF"))) {
+            error = q.lastError().text();
+            return false;
+        }
+    }
+
+    auto restoreForeignKeys = [&db]() {
+        QSqlQuery q(db);
+        q.exec(QStringLiteral("PRAGMA foreign_keys = ON"));
+    };
+
+    if (!db.transaction()) {
+        error = db.lastError().text();
+        restoreForeignKeys();
+        return false;
+    }
+
+    const QStringList steps = {
+        QStringLiteral("DROP TABLE IF EXISTS hmi_tags_new"),
+        hmiTagsTableSql(QStringLiteral("hmi_tags_new")),
+        QStringLiteral(
+            "INSERT INTO hmi_tags_new "
+            "(id, name, kind, register_id, unit, min_value, max_value, scale, access, "
+            " created_at, updated_at) "
+            "SELECT id, name, 'register', register_id, unit, min_value, max_value, scale, access, "
+            "       created_at, updated_at FROM hmi_tags"),
+        QStringLiteral("DROP TABLE hmi_tags"),
+        QStringLiteral("ALTER TABLE hmi_tags_new RENAME TO hmi_tags")
+    };
+
+    QSqlQuery q(db);
+    for (const QString &sql : steps) {
+        if (!q.exec(sql)) {
+            error = QStringLiteral("HMI tag table migration failed: %1").arg(q.lastError().text());
+            db.rollback();
+            restoreForeignKeys();
+            return false;
+        }
+    }
+
+    if (!db.commit()) {
+        error = db.lastError().text();
+        db.rollback();
+        restoreForeignKeys();
+        return false;
+    }
+    restoreForeignKeys();
+    return true;
+}
+
 bool DeviceDatabase::initSchema(QString& error)
 {
     if (!isOpen()) {
@@ -295,20 +432,7 @@ bool DeviceDatabase::initSchema(QString& error)
         //-----------------------------------------------------------//
         // HMI Tags
         //-----------------------------------------------------------//
-        QStringLiteral(
-            "CREATE TABLE IF NOT EXISTS hmi_tags ("
-            "  id          TEXT    PRIMARY KEY,"
-            "  name        TEXT    NOT NULL,"
-            "  register_id INTEGER NOT NULL REFERENCES registers(id) ON DELETE CASCADE,"
-            "  unit        TEXT,"
-            "  min_value   REAL,"
-            "  max_value   REAL,"
-            "  scale       REAL,"
-            "  access      TEXT    CHECK(access IS NULL OR access IN ('r', 'rw')),"
-            "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-            "  updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP"
-            ")"
-        ),
+        hmiTagsTableSql(QStringLiteral("hmi_tags")),
 
         //-----------------------------------------------------------//
         // HMI Project — single row (id is pinned to 1)
@@ -390,6 +514,9 @@ bool DeviceDatabase::initSchema(QString& error)
         mq.exec(QStringLiteral("ALTER TABLE hmi_project ADD COLUMN poll_ms INTEGER NOT NULL DEFAULT 1000"));
         // ignore error — column may already exist
     }
+
+    if (!migrateHmiTagKinds(error))
+        return false;
 
     //-----------------------------------------------------------//
     // ensure default admin account exists
@@ -1443,6 +1570,24 @@ bool DeviceDatabase::restoreData(bool restoreDevices,
     }
 
     //-----------------------------------------------------------//
+    // Expr tags have no register and stay as they are; report those
+    // whose referenced register tags did not survive the restore.
+    //-----------------------------------------------------------//
+    if (relinkTags) {
+        QStringList broken;
+        if (!brokenExprTags(db, broken, error)) {
+            db.rollback();
+            return false;
+        }
+        if (!broken.isEmpty()) {
+            hmiWarnings << QStringLiteral(
+                "%1 computed HMI tag(s) refer to tags that are no longer present "
+                "(their value is bad until fixed): %2")
+                .arg(broken.size()).arg(broken.join(QStringLiteral("; ")));
+        }
+    }
+
+    //-----------------------------------------------------------//
     // Restore Users
     //-----------------------------------------------------------//
     if (restoreUsers) {
@@ -1619,11 +1764,25 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
     //-----------------------------------------------------------//
     // Tags — resolve unifiedAddress back to the current register id
     //-----------------------------------------------------------//
+    // Register tags first, then expr tags (which refer to them by id).
     int droppedTags = 0;
+    QList<QJsonObject> exprTags;
+    QStringList unknownKinds;
     for (const QJsonValue &v : tags) {
         const QJsonObject obj = v.toObject();
         const QString id      = obj[QLatin1String("id")].toString();
         if (id.isEmpty()) continue;
+
+        // Files made before computed tags have no "kind": all register tags
+        const QString kind = obj[QLatin1String("kind")].toString(QStringLiteral("register"));
+        if (kind == QLatin1String("expr")) {
+            exprTags.append(obj);
+            continue;
+        }
+        if (kind != QLatin1String("register")) {
+            unknownKinds.append(QStringLiteral("%1 (%2)").arg(id, kind));
+            continue;
+        }
 
         const QJsonValue unified = obj[QLatin1String("unifiedAddress")];
         const int registerId = unified.isDouble()
@@ -1675,6 +1834,74 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
         warnings << QStringLiteral(
             "%1 HMI tag(s) skipped — their register is not present on this device")
             .arg(droppedTags);
+    }
+    if (!unknownKinds.isEmpty()) {
+        warnings << QStringLiteral("%1 HMI tag(s) of a kind this device does not know skipped: %2")
+                        .arg(unknownKinds.size()).arg(unknownKinds.join(QStringLiteral(", ")));
+    }
+
+    //-----------------------------------------------------------//
+    // Expr tags. The HMI import API rejects bad expressions before
+    // getting here; a system restore skips them with a warning instead
+    // of failing the whole restore.
+    //-----------------------------------------------------------//
+    QHash<QString, QSet<QString>> graph;
+    QList<QJsonObject> validExpr;
+    QStringList invalidExpr;
+    for (const QJsonObject &obj : exprTags) {
+        const QString id = obj[QLatin1String("id")].toString();
+        Hmi::ValueType vt;
+        Hmi::ExprInfo info;
+        QString err, path;
+        if (!Hmi::valueTypeFromString(obj[QLatin1String("valueType")].toString(), vt)) {
+            invalidExpr.append(QStringLiteral("%1 (valueType)").arg(id));
+            continue;
+        }
+        if (!Hmi::validateExpr(obj[QLatin1String("expr")], info, err, path)) {
+            invalidExpr.append(QStringLiteral("%1 (%2)").arg(id, err));
+            continue;
+        }
+        graph.insert(id, info.refs);
+        validExpr.append(obj);
+    }
+    QString graphErr;
+    if (!Hmi::checkGraph(graph, graphErr)) {
+        invalidExpr.append(QStringLiteral("all %1 computed tag(s): %2").arg(validExpr.size()).arg(graphErr));
+        validExpr.clear();
+    }
+    if (!invalidExpr.isEmpty()) {
+        warnings << QStringLiteral("computed HMI tag(s) skipped — invalid expression: %1")
+                        .arg(invalidExpr.join(QStringLiteral("; ")));
+    }
+
+    for (const QJsonObject &obj : validExpr) {
+        Model::HmiTag tag;
+        tag.id        = obj[QLatin1String("id")].toString();
+        tag.name      = obj[QLatin1String("name")].toString(QStringLiteral(""));
+        tag.kind      = QStringLiteral("expr");
+        tag.unit      = obj[QLatin1String("unit")].toString();
+        tag.valueType = obj[QLatin1String("valueType")].toString();
+        tag.expr      = QString::fromUtf8(QJsonDocument(obj[QLatin1String("expr")].toObject())
+                                              .toJson(QJsonDocument::Compact));
+        q.prepare(QStringLiteral(
+            "INSERT INTO hmi_tags "
+            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)"));
+        bindHmiTagFields(q, tag);
+        q.addBindValue(tag.id);
+        if (!q.exec()) {
+            error = q.lastError().text();
+            return false;
+        }
+    }
+
+    QStringList broken;
+    if (!brokenExprTags(db, broken, error))
+        return false;
+    if (!broken.isEmpty()) {
+        warnings << QStringLiteral("%1 computed HMI tag(s) refer to tags that are not present "
+                                   "(their value is bad until fixed): %2")
+                        .arg(broken.size()).arg(broken.join(QStringLiteral("; ")));
     }
 
     return true;
@@ -1806,10 +2033,11 @@ bool DeviceDatabase::factoryReset(QString &error)
 // ---------------------------------------------------------------------------
 static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
 {
+    // column order: kHmiTagColumns
     Model::HmiTag tag;
     tag.id         = q.value(0).toString();
     tag.name       = q.value(1).toString();
-    tag.registerId = q.value(2).toInt();
+    tag.registerId = q.value(2).isNull() ? -1 : q.value(2).toInt();
 
     if (!q.value(3).isNull()) tag.unit        = q.value(3).toString();
     if (!q.value(4).isNull()) { tag.hasMin    = true; tag.minValue  = q.value(4).toDouble(); }
@@ -1819,6 +2047,9 @@ static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
 
     tag.createdAt  = q.value(8).toString();
     tag.updatedAt  = q.value(9).toString();
+    tag.kind       = q.value(10).toString();
+    tag.valueType  = q.value(11).toString();
+    tag.expr       = q.value(12).toString();
     return tag;
 }
 
@@ -1827,9 +2058,8 @@ QList<Model::HmiTag> DeviceDatabase::loadHmiTags(QString &error) const
     QList<Model::HmiTag> list;
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
-    if (!q.exec(QStringLiteral(
-            "SELECT id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at "
-            "FROM hmi_tags ORDER BY id"))) {
+    if (!q.exec(QStringLiteral("SELECT %1 FROM hmi_tags ORDER BY id")
+                    .arg(QLatin1String(kHmiTagColumns)))) {
         error = q.lastError().text();
         return list;
     }
@@ -1843,9 +2073,8 @@ Model::HmiTag DeviceDatabase::loadHmiTag(const QString &id, bool &found, QString
     found = false;
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
-    q.prepare(QStringLiteral(
-        "SELECT id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at "
-        "FROM hmi_tags WHERE id=?"));
+    q.prepare(QStringLiteral("SELECT %1 FROM hmi_tags WHERE id=?")
+                  .arg(QLatin1String(kHmiTagColumns)));
     q.addBindValue(id);
     if (!q.exec()) { error = q.lastError().text(); return {}; }
     if (!q.next())  return {};
@@ -1858,16 +2087,11 @@ bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "INSERT INTO hmi_tags (id,name,register_id,unit,min_value,max_value,scale,access) "
-        "VALUES (?,?,?,?,?,?,?,?)"));
+        "INSERT INTO hmi_tags "
+        "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)"));
+    bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
-    q.addBindValue(tag.name);
-    q.addBindValue(tag.registerId);
-    q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
-    q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasScale          ? QVariant(tag.scale)     : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
     if (!q.exec()) { error = q.lastError().text(); return false; }
     return true;
 }
@@ -1877,15 +2101,9 @@ bool DeviceDatabase::updateHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
-        "UPDATE hmi_tags SET name=?,register_id=?,unit=?,min_value=?,max_value=?,scale=?,access=?,"
-        "updated_at=CURRENT_TIMESTAMP WHERE id=?"));
-    q.addBindValue(tag.name);
-    q.addBindValue(tag.registerId);
-    q.addBindValue(tag.unit.isEmpty()    ? QVariant(QMetaType(QMetaType::QString)) : tag.unit);
-    q.addBindValue(tag.hasMin            ? QVariant(tag.minValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasMax            ? QVariant(tag.maxValue)  : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.hasScale          ? QVariant(tag.scale)     : QVariant(QMetaType(QMetaType::Double)));
-    q.addBindValue(tag.access.isEmpty()  ? QVariant(QMetaType(QMetaType::QString)) : tag.access);
+        "UPDATE hmi_tags SET name=?,kind=?,register_id=?,unit=?,min_value=?,max_value=?,scale=?,"
+        "access=?,value_type=?,expr=?,updated_at=CURRENT_TIMESTAMP WHERE id=?"));
+    bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }
     if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(tag.id); return false; }
@@ -1900,6 +2118,40 @@ bool DeviceDatabase::deleteHmiTag(const QString &id, QString &error)
     q.addBindValue(id);
     if (!q.exec()) { error = q.lastError().text(); return false; }
     if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(id); return false; }
+    return true;
+}
+
+bool DeviceDatabase::brokenExprTags(QSqlDatabase &db, QStringList &broken, QString &error) const
+{
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("SELECT id, kind, expr FROM hmi_tags ORDER BY id"))) {
+        error = q.lastError().text();
+        return false;
+    }
+    QSet<QString> ids;
+    QList<QPair<QString, QString>> exprs;
+    while (q.next()) {
+        ids.insert(q.value(0).toString());
+        if (q.value(1).toString() == QLatin1String("expr"))
+            exprs.append({ q.value(0).toString(), q.value(2).toString() });
+    }
+    for (const auto &e : exprs) {
+        Hmi::ExprInfo info;
+        QString err, path;
+        Hmi::validateExpr(QJsonDocument::fromJson(
+                              QStringLiteral("{\"x\":%1}").arg(e.second).toUtf8())
+                              .object().value(QLatin1String("x")),
+                          info, err, path);
+        QStringList missing;
+        for (const QString &ref : info.refs)
+            if (!ids.contains(ref))
+                missing.append(ref);
+        if (!missing.isEmpty()) {
+            missing.sort();
+            broken.append(QStringLiteral("%1 (missing: %2)")
+                              .arg(e.first, missing.join(QStringLiteral(", "))));
+        }
+    }
     return true;
 }
 

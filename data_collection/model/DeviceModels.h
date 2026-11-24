@@ -187,7 +187,11 @@ struct WriteRequest {
 struct HmiTag {
     QString id;                    // PK (영숫자+_+-, max 64)
     QString name;
-    int     registerId  = -1;      // FK → registers.id
+    QString kind = QStringLiteral("register");   // "register" | "expr" ("param" is reserved)
+    int     registerId  = -1;      // FK → registers.id (register tags only; -1 otherwise)
+    // expr tags: result type ("bool" | "number" | "string") and the AST as compact JSON
+    QString valueType;
+    QString expr;
     // optional overrides; empty / hasXxx=false means inherit from register
     QString unit;
     bool    hasMin      = false;

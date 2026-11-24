@@ -323,6 +323,20 @@ QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabas
         QJsonObject obj;
         obj[QLatin1String("id")]             = t.id;
         obj[QLatin1String("name")]           = t.name;
+        obj[QLatin1String("kind")]           = t.kind;
+
+        //-----------------------------------------------------------//
+        // Computed tags have no register. Firmware older than computed
+        // tags skips them on import because they have no unifiedAddress.
+        //-----------------------------------------------------------//
+        if (t.kind == QLatin1String("expr")) {
+            obj[QLatin1String("valueType")] = t.valueType;
+            obj[QLatin1String("expr")]      = QJsonDocument::fromJson(t.expr.toUtf8()).object();
+            if (!t.unit.isEmpty()) obj[QLatin1String("unit")] = t.unit;
+            tagArr.append(obj);
+            continue;
+        }
+
         obj[QLatin1String("unifiedAddress")] = registerIdToUnified.value(t.registerId, -1);
 
         if (!t.unit.isEmpty())  obj[QLatin1String("unit")]     = t.unit;

@@ -91,6 +91,7 @@ add_executable(swr
   data_collection/polling/TcpWorker.h data_collection/polling/TcpWorker.cpp
   data_collection/store/DeviceList.h data_collection/store/DeviceList.cpp
   api/ApiServer.h api/ApiServer.cpp
+  hmi/HmiExpr.h hmi/HmiExpr.cpp
   data_collection/processor/DataCollector.h data_collection/processor/DataCollector.cpp
   data_collection/comm/modbus/ModbusASCIIClient.h data_collection/comm/modbus/ModbusASCIIClient.cpp
   data_collection/comm/modbus/ModbusRTUClient.h data_collection/comm/modbus/ModbusRTUClient.cpp

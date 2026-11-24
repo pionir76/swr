@@ -117,6 +117,12 @@ public:
     bool factoryReset(QString &error);
 
 private:
+    bool migrateHmiTagKinds(QString &error);
+
+    // Expr tags whose expression refers to a tag that does not exist,
+    // as "ID (missing: A, B)" — for restore and import warnings.
+    bool brokenExprTags(QSqlDatabase &db, QStringList &broken, QString &error) const;
+
     bool replaceHmi(QSqlDatabase &db,
                     const QJsonObject &hmi,
                     int revisionFloor,
