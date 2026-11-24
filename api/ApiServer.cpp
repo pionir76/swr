@@ -1215,7 +1215,8 @@ QHttpServerResponse ApiServer::handlePutRegister(const QHttpServerRequest &reque
     config.id                = existing.id;
     config.deviceId          = existing.deviceId;
     config.tagName           = tagName;
-    config.displayName       = body.value("displayName").toString(tagName);
+    // Absent fields keep their current value (only POST fills displayName from tagName)
+    config.displayName       = body.value("displayName").toString(existing.displayName);
     config.localAddress      = body.value("localAddress").toInt(existing.localAddress);
     config.type              = type;
     config.readOnly          = body.value("readOnly").toBool(existing.readOnly);
