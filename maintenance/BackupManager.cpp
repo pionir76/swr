@@ -333,6 +333,8 @@ QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabas
             obj[QLatin1String("valueType")] = t.valueType;
             obj[QLatin1String("expr")]      = QJsonDocument::fromJson(t.expr.toUtf8()).object();
             if (!t.unit.isEmpty()) obj[QLatin1String("unit")] = t.unit;
+            if (t.valueType == QLatin1String("number") && t.decimals >= 0)
+                obj[QLatin1String("decimals")] = t.decimals;
             tagArr.append(obj);
             continue;
         }

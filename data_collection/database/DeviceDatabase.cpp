@@ -40,6 +40,7 @@ static QString hmiTagsTableSql(const QString &table)
         "  access      TEXT    CHECK(access IS NULL OR access IN ('r', 'rw')),"
         "  value_type  TEXT    CHECK(value_type IS NULL OR value_type IN ('bool', 'number', 'string')),"
         "  expr        TEXT,"
+        "  decimals    INTEGER CHECK(decimals IS NULL OR decimals BETWEEN 0 AND 6),"
         "  param_init  TEXT,"
         "  param_value TEXT,"
         "  created_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,"
@@ -50,10 +51,11 @@ static QString hmiTagsTableSql(const QString &table)
 
 static const char kHmiTagColumns[] =
     "id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at,"
-    "kind,value_type,expr";
+    "kind,value_type,expr,decimals";
 
-// Binds name, kind, register_id, unit, min, max, scale, access, value_type, expr.
-// register tags carry no value_type/expr; expr tags carry no register or overrides.
+// Binds name, kind, register_id, unit, min, max, scale, access, value_type, expr,
+// decimals. register tags carry no value_type/expr; expr tags carry no register
+// or overrides; decimals is kept for number expr tags only.
 static void bindHmiTagFields(QSqlQuery &q, const Model::HmiTag &tag)
 {
     const QVariant nullText(QMetaType(QMetaType::QString));
@@ -71,6 +73,9 @@ static void bindHmiTagFields(QSqlQuery &q, const Model::HmiTag &tag)
     q.addBindValue(isRegister && !tag.access.isEmpty() ? QVariant(tag.access) : nullText);
     q.addBindValue(isRegister || tag.valueType.isEmpty() ? nullText : QVariant(tag.valueType));
     q.addBindValue(isRegister || tag.expr.isEmpty()      ? nullText : QVariant(tag.expr));
+    const bool hasDecimals = !isRegister && tag.valueType == QLatin1String("number")
+                          && tag.decimals >= 0;
+    q.addBindValue(hasDecimals ? QVariant(tag.decimals) : nullInt);
 }
 
 
@@ -517,6 +522,17 @@ bool DeviceDatabase::initSchema(QString& error)
 
     if (!migrateHmiTagKinds(error))
         return false;
+
+    // Number expr tags: result digits (2026-11-25). Added after the kind
+    // migration so a table it rebuilds (which already has the column) is skipped.
+    // This is not the old register-tag "decimals" column: the kind migration
+    // dropped that one, so no stale values come back.
+    {
+        QSqlQuery mq(db);
+        mq.exec(QStringLiteral("ALTER TABLE hmi_tags ADD COLUMN decimals INTEGER "
+                               "CHECK(decimals IS NULL OR decimals BETWEEN 0 AND 6)"));
+        // ignore error — column may already exist
+    }
 
     //-----------------------------------------------------------//
     // ensure default admin account exists
@@ -1861,6 +1877,12 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
             invalidExpr.append(QStringLiteral("%1 (%2)").arg(id, err));
             continue;
         }
+        int decimals = -1;
+        if (vt == Hmi::ValueType::Number &&
+            !Hmi::decimalsFromJson(obj[QLatin1String("decimals")], decimals)) {
+            invalidExpr.append(QStringLiteral("%1 (decimals)").arg(id));
+            continue;
+        }
         graph.insert(id, info.refs);
         validExpr.append(obj);
     }
@@ -1881,12 +1903,14 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
         tag.kind      = QStringLiteral("expr");
         tag.unit      = obj[QLatin1String("unit")].toString();
         tag.valueType = obj[QLatin1String("valueType")].toString();
+        if (tag.valueType == QLatin1String("number"))
+            Hmi::decimalsFromJson(obj[QLatin1String("decimals")], tag.decimals);   // checked above
         tag.expr      = QString::fromUtf8(QJsonDocument(obj[QLatin1String("expr")].toObject())
                                               .toJson(QJsonDocument::Compact));
         q.prepare(QStringLiteral(
             "INSERT INTO hmi_tags "
-            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)"));
+            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"));
         bindHmiTagFields(q, tag);
         q.addBindValue(tag.id);
         if (!q.exec()) {
@@ -2050,6 +2074,7 @@ static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
     tag.kind       = q.value(10).toString();
     tag.valueType  = q.value(11).toString();
     tag.expr       = q.value(12).toString();
+    tag.decimals   = q.value(13).isNull() ? -1 : q.value(13).toInt();
     return tag;
 }
 
@@ -2088,8 +2113,8 @@ bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO hmi_tags "
-        "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)"));
+        "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"));
     bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }
@@ -2102,7 +2127,7 @@ bool DeviceDatabase::updateHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "UPDATE hmi_tags SET name=?,kind=?,register_id=?,unit=?,min_value=?,max_value=?,scale=?,"
-        "access=?,value_type=?,expr=?,updated_at=CURRENT_TIMESTAMP WHERE id=?"));
+        "access=?,value_type=?,expr=?,decimals=?,updated_at=CURRENT_TIMESTAMP WHERE id=?"));
     bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }

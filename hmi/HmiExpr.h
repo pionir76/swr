@@ -27,6 +27,7 @@ constexpr int kExprMaxNodes = 64;     // nodes in one expression
 constexpr int kExprMaxRefs  = 32;     // distinct tags one expression refers to
 constexpr int kExprMaxDepth = 8;      // expr -> expr chain length
 constexpr int kBitMax       = 15;     // bitAny / bitNone bit numbers
+constexpr int kDecimalsMax  = 6;      // decimals of a number expr tag
 
 //-----------------------------------------------------------//
 // Raw word -> display value
@@ -36,6 +37,10 @@ int scaleDigits(double scale);
 
 // Round to the given decimal places, so 2472 * 0.1 compares equal to 247.2.
 double roundTo(double value, int digits);
+
+// decimals of a number expr tag: null or absent -> -1 (no rounding),
+// an integer 0..kDecimalsMax -> that value. false for anything else.
+bool decimalsFromJson(const QJsonValue &v, int &out);
 
 // raw: null or an unsigned word (0–65535). Coils and discrete inputs give 0/1
 // and ignore the scale. Signed registers read the word as 16-bit two's complement.
@@ -107,6 +112,7 @@ struct TagInput {
 
     // Expr: the expression, or a fixed value given by the caller (eval API inputs)
     ValueType  valueType = ValueType::Bool;
+    int        decimals  = -1;    // number results only; -1 = no rounding
     QJsonValue expr;
     bool       fixed = false;
     Sample     fixedSample;
@@ -130,14 +136,14 @@ public:
     Sample evalTag(const QString &id);
 
     // Value of a free expression (the eval API), converted to valueType.
-    Sample evalExpr(const QJsonValue &expr, ValueType valueType);
+    Sample evalExpr(const QJsonValue &expr, ValueType valueType, int decimals = -1);
 
     // Every tag the evaluations so far touched, directly or through expr tags.
     const QMap<QString, UsedInput> &used() const { return m_used; }
 
 private:
     Sample evalNode(const QJsonValue &node);
-    Sample finish(const Sample &s, ValueType valueType) const;
+    Sample finish(const Sample &s, ValueType valueType, int decimals) const;
 
     TagLookup                m_lookup;
     QMap<QString, UsedInput> m_used;

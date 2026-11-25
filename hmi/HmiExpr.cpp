@@ -31,6 +31,19 @@ double roundTo(double value, int digits)
     return QString::number(value, 'f', digits).toDouble();
 }
 
+bool decimalsFromJson(const QJsonValue &v, int &out)
+{
+    if (v.isUndefined() || v.isNull()) {
+        out = -1;
+        return true;
+    }
+    const double d = v.toDouble(-1.0);
+    if (!v.isDouble() || d != std::floor(d) || d < 0 || d > kDecimalsMax)
+        return false;
+    out = static_cast<int>(d);
+    return true;
+}
+
 QJsonValue toDisplay(const QJsonValue &raw, bool isBool, bool isSigned, double scale)
 {
     if (!raw.isDouble())
@@ -184,6 +197,14 @@ constexpr OpSpec kOps[] = {
     { "or",      2, -1, false, -1 },
     { "not",     1,  1, false, -1 },
     { "select",  3, -1, true,  -1 },
+    { "add",     2, -1, false, -1 },
+    { "sub",     2,  2, false, -1 },
+    { "mul",     2, -1, false, -1 },
+    { "div",     2,  2, false, -1 },
+    { "min",     2, -1, false, -1 },
+    { "max",     2, -1, false, -1 },
+    { "avg",     2, -1, false, -1 },
+    { "abs",     1,  1, false, -1 },
 };
 
 const OpSpec *findOp(const QString &name)
@@ -411,6 +432,55 @@ bool bitTest(bool any, const QJsonValue &v, const QJsonValue &bitList)
     return any ? hit : !hit;
 }
 
+// add / sub / mul / div / min / max / avg / abs. Every argument must read as
+// a number and the result must be finite (division by 0 is not); otherwise
+// the result cannot be decided. Returns false for an operator that is not
+// arithmetic.
+bool arith(const QString &op, const QList<QJsonValue> &v, bool &ok, double &out)
+{
+    enum { Add, Sub, Mul, Div, Min, Max, Avg, Abs } kind;
+    if      (op == QLatin1String("add")) kind = Add;
+    else if (op == QLatin1String("sub")) kind = Sub;
+    else if (op == QLatin1String("mul")) kind = Mul;
+    else if (op == QLatin1String("div")) kind = Div;
+    else if (op == QLatin1String("min")) kind = Min;
+    else if (op == QLatin1String("max")) kind = Max;
+    else if (op == QLatin1String("avg")) kind = Avg;
+    else if (op == QLatin1String("abs")) kind = Abs;
+    else return false;
+
+    ok = false;
+    const int n = v.size();
+    if (n < 1 || (kind == Abs && n != 1) || (kind != Abs && n < 2)
+        || ((kind == Sub || kind == Div) && n != 2))
+        return true;
+
+    QList<double> x;
+    x.reserve(n);
+    for (const QJsonValue &a : v) {
+        const double d = toNumber(a);
+        if (!std::isfinite(d))
+            return true;
+        x.append(d);
+    }
+
+    double r = x[0];
+    switch (kind) {
+    case Add: case Avg: for (int i = 1; i < n; ++i) r += x[i]; if (kind == Avg) r /= n; break;
+    case Mul: for (int i = 1; i < n; ++i) r *= x[i]; break;
+    case Min: for (int i = 1; i < n; ++i) r = std::min(r, x[i]); break;
+    case Max: for (int i = 1; i < n; ++i) r = std::max(r, x[i]); break;
+    case Sub: r = x[0] - x[1]; break;
+    case Div: if (x[1] == 0.0) return true; r = x[0] / x[1]; break;
+    case Abs: r = std::abs(x[0]); break;
+    }
+    if (!std::isfinite(r))
+        return true;
+    out = r;
+    ok  = true;
+    return true;
+}
+
 } // namespace
 
 Evaluator::Evaluator(TagLookup lookup)
@@ -450,7 +520,7 @@ Sample Evaluator::evalTag(const QString &id)
             used.sample = in.fixedSample.q == Quality::Bad ? kBad : in.fixedSample;
         } else {
             m_inProgress.insert(id);
-            used.sample = finish(evalNode(in.expr), in.valueType);
+            used.sample = finish(evalNode(in.expr), in.valueType, in.decimals);
             m_inProgress.remove(id);
         }
         break;
@@ -460,12 +530,14 @@ Sample Evaluator::evalTag(const QString &id)
     return used.sample;
 }
 
-Sample Evaluator::evalExpr(const QJsonValue &expr, ValueType valueType)
+Sample Evaluator::evalExpr(const QJsonValue &expr, ValueType valueType, int decimals)
 {
-    return finish(evalNode(expr), valueType);
+    return finish(evalNode(expr), valueType, decimals);
 }
 
-Sample Evaluator::finish(const Sample &s, ValueType valueType) const
+// Converts the final result to the tag's value type. decimals rounds a
+// number result only (intermediate values are never rounded); -0 becomes 0.
+Sample Evaluator::finish(const Sample &s, ValueType valueType, int decimals) const
 {
     if (s.q == Quality::Bad)
         return kBad;
@@ -474,8 +546,14 @@ Sample Evaluator::finish(const Sample &s, ValueType valueType) const
     case ValueType::Bool:
         return Sample{ isTruthy(s.value), s.q };
     case ValueType::Number: {
-        const double d = toNumber(s.value);
-        return std::isfinite(d) ? Sample{ d, s.q } : kBad;
+        double d = toNumber(s.value);
+        if (!std::isfinite(d))
+            return kBad;
+        if (decimals >= 0)
+            d = roundTo(d, decimals);
+        if (d == 0.0)
+            d = 0.0;   // drop the sign of -0
+        return Sample{ d, s.q };
     }
     case ValueType::String:
         break;
@@ -550,6 +628,11 @@ Sample Evaluator::evalNode(const QJsonValue &node)
                 return result(v[i + 1]);
         return result(v[n - 1]);
     }
+
+    bool   ok = false;
+    double r  = 0.0;
+    if (arith(op, v, ok, r))
+        return ok ? result(r) : kBad;
 
     return kBad;   // unknown operator or wrong argument count
 }

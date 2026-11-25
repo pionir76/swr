@@ -3028,6 +3028,8 @@ static QJsonObject hmiTagToJson(const Model::HmiTag &t, const Store::DeviceList 
         src[QLatin1String("expr")]      = expr;
         o[QLatin1String("source")]      = src;
         o[QLatin1String("unit")]        = t.unit.isEmpty() ? QJsonValue() : t.unit;
+        o[QLatin1String("decimals")]    = (t.valueType == QLatin1String("number") && t.decimals >= 0)
+                                          ? QJsonValue(t.decimals) : QJsonValue();
         o[QLatin1String("min")]         = QJsonValue();
         o[QLatin1String("max")]         = QJsonValue();
         o[QLatin1String("scale")]       = QJsonValue();
@@ -3144,7 +3146,17 @@ static bool parseHmiTagBody(const QJsonObject &body, const QString &defaultKind,
             err.status = QHttpServerResponse::StatusCode::UnprocessableEntity;
             return false;
         }
+        // decimals: number tags only; other value types ignore it and store
+        // null. A PUT replaces the tag, so an absent decimals means null.
+        int decimals = -1;
+        if (vt == Hmi::ValueType::Number &&
+            !Hmi::decimalsFromJson(body.value(QLatin1String("decimals")), decimals)) {
+            err.message = QStringLiteral("'decimals' must be an integer 0–%1 or null").arg(Hmi::kDecimalsMax);
+            err.status  = QHttpServerResponse::StatusCode::UnprocessableEntity;
+            return false;
+        }
         tag.valueType = Hmi::valueTypeToString(vt);
+        tag.decimals  = decimals;
         tag.expr      = QString::fromUtf8(QJsonDocument(expr.toObject()).toJson(QJsonDocument::Compact));
         if (body.contains(QLatin1String("unit")))
             tag.unit = body.value(QLatin1String("unit")).toString();
@@ -3315,6 +3327,7 @@ static Hmi::TagLookup makeHmiLookup(HmiEvalContext &ctx,
         if (isExprTag(t)) {
             in.kind = Hmi::TagInput::Kind::Expr;
             Hmi::valueTypeFromString(t.valueType, in.valueType);
+            in.decimals = in.valueType == Hmi::ValueType::Number ? t.decimals : -1;
             in.expr = exprFromText(t.expr);
             auto ov = ctx.overrides.constFind(id);
             if (ov != ctx.overrides.constEnd()) {
@@ -3637,6 +3650,14 @@ QHttpServerResponse ApiServer::handlePostHmiEval(const QHttpServerRequest &reque
     if (!body.contains(QLatin1String("expr")))
         return badRequest(QStringLiteral("'expr' is required"));
 
+    int decimals = -1;   // number results only; ignored otherwise
+    if (vt == Hmi::ValueType::Number &&
+        !Hmi::decimalsFromJson(body.value(QLatin1String("decimals")), decimals)) {
+        QJsonObject e;
+        e[QLatin1String("error")] = QStringLiteral("'decimals' must be an integer 0–%1 or null").arg(Hmi::kDecimalsMax);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::UnprocessableEntity);
+    }
+
     const QJsonValue expr = body.value(QLatin1String("expr"));
     {
         Hmi::ExprInfo info;
@@ -3700,7 +3721,7 @@ QHttpServerResponse ApiServer::handlePostHmiEval(const QHttpServerRequest &reque
 
     const QDateTime now = QDateTime::currentDateTimeUtc();
     Hmi::Evaluator evaluator(makeHmiLookup(ctx, *m_deviceList, *m_registerTable, now));
-    const Hmi::Sample result = evaluator.evalExpr(expr, vt);
+    const Hmi::Sample result = evaluator.evalExpr(expr, vt, decimals);
 
     QJsonObject used;
     QStringList missing;
@@ -4433,6 +4454,12 @@ bool parseHmiImportFile(const QByteArray &body, int maxScreens, HmiImportFile &f
             if (!Hmi::validateExpr(t.value(QLatin1String("expr")), info, err, path))
                 return hmiImportFail(f, Code::BadRequest,
                                      QStringLiteral("tag '%1': %2 (at '%3')").arg(id, err, path));
+            int decimals = -1;
+            if (vt == Hmi::ValueType::Number &&
+                !Hmi::decimalsFromJson(t.value(QLatin1String("decimals")), decimals))
+                return hmiImportFail(f, Code::BadRequest,
+                                     QStringLiteral("tag '%1': 'decimals' must be an integer 0–%2 or null")
+                                         .arg(id).arg(Hmi::kDecimalsMax));
             f.exprRefs.insert(id, info.refs);
         } else if (kind != QLatin1String("register")) {
             f.warnings << QStringLiteral("Tag '%1' has kind '%2', which this device does not know; "

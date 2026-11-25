@@ -192,6 +192,7 @@ struct HmiTag {
     // expr tags: result type ("bool" | "number" | "string") and the AST as compact JSON
     QString valueType;
     QString expr;
+    int     decimals = -1;     // number expr tags: result digits 0..6; -1 = no rounding
     // optional overrides; empty / hasXxx=false means inherit from register
     QString unit;
     bool    hasMin      = false;

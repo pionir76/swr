@@ -122,6 +122,8 @@ static void runExpr(const QJsonObject &doc)
                 in.kind = TagInput::Kind::Expr;
                 valueTypeFromString(src.value(QLatin1String("valueType")).toString(), in.valueType);
                 in.expr = src.value(QLatin1String("expr"));
+                check(decimalsFromJson(t.value(QLatin1String("decimals")), in.decimals),
+                      QStringLiteral("decimals of tag ") + id);
                 return in;
             }
             in.kind     = TagInput::Kind::Register;
@@ -145,8 +147,12 @@ static void runExpr(const QJsonObject &doc)
         ValueType vt = ValueType::Bool;
         valueTypeFromString(c.value(QLatin1String("valueType")).toString(), vt);
 
+        int decimals = -1;
+        check(decimalsFromJson(c.value(QLatin1String("decimals")), decimals),
+              QStringLiteral("decimals of case: ") + name);
+
         Evaluator ev(lookup);
-        const Sample got = ev.evalExpr(c.value(QLatin1String("expr")), vt);
+        const Sample got = ev.evalExpr(c.value(QLatin1String("expr")), vt, decimals);
         const QJsonObject want = c.value(QLatin1String("expect")).toObject();
         const bool ok = sameValue(got.value, want.value(QLatin1String("value")))
                      && qualityToString(got.q) == want.value(QLatin1String("q")).toString();
@@ -189,6 +195,44 @@ static void runLocal()
     expectInvalid(R"({"tag":"A","value":1})", QString(), QStringLiteral("two node kinds"));
     expectInvalid(R"({"tag":"bad id"})", QString(), QStringLiteral("bad tag id"));
     expectInvalid(R"("A")", QString(), QStringLiteral("node not an object"));
+    expectInvalid(R"({"op":"add","args":[{"value":1}]})", QString(), QStringLiteral("add with one argument"));
+    expectInvalid(R"({"op":"sub","args":[{"value":1},{"value":2},{"value":3}]})", QString(),
+                  QStringLiteral("sub with three arguments"));
+    expectInvalid(R"({"op":"div","args":[{"value":1}]})", QString(), QStringLiteral("div with one argument"));
+    expectInvalid(R"({"op":"abs","args":[{"value":1},{"value":2}]})", QString(),
+                  QStringLiteral("abs with two arguments"));
+    expectInvalid(R"({"op":"gt","args":[{"op":"avg","args":[{"tag":"A"}]},{"value":0}]})",
+                  QStringLiteral("args[0]"), QStringLiteral("avg with one argument, nested"));
+
+    // decimals field
+    {
+        int d = 99;
+        check(decimalsFromJson(QJsonValue(QJsonValue::Null), d) && d == -1, QStringLiteral("decimals null"));
+        check(decimalsFromJson(QJsonValue(QJsonValue::Undefined), d) && d == -1, QStringLiteral("decimals absent"));
+        check(decimalsFromJson(QJsonValue(0), d) && d == 0, QStringLiteral("decimals 0"));
+        check(decimalsFromJson(QJsonValue(6), d) && d == 6, QStringLiteral("decimals 6"));
+        check(!decimalsFromJson(QJsonValue(7), d), QStringLiteral("decimals 7 rejected"));
+        check(!decimalsFromJson(QJsonValue(-1), d), QStringLiteral("decimals -1 rejected"));
+        check(!decimalsFromJson(QJsonValue(1.5), d), QStringLiteral("decimals 1.5 rejected"));
+        check(!decimalsFromJson(QJsonValue(QStringLiteral("2")), d), QStringLiteral("decimals \"2\" rejected"));
+    }
+
+    // -0 never leaves a number result (sameValue cannot tell -0 from 0)
+    {
+        Evaluator ev([](const QString &) { return TagInput(); });
+        const Sample a = ev.evalExpr(parse(R"({"op":"mul","args":[{"value":-0.001},{"value":1}]})"),
+                                     ValueType::Number, 1);
+        check(a.q == Quality::Good && !std::signbit(a.value.toDouble()), QStringLiteral("rounded -0 is 0"));
+        const Sample b = ev.evalExpr(parse(R"({"op":"mul","args":[{"value":-1},{"value":0}]})"),
+                                     ValueType::Number);
+        check(b.q == Quality::Good && !std::signbit(b.value.toDouble()), QStringLiteral("-1 * 0 is 0"));
+        const Sample c = ev.evalExpr(parse(R"({"op":"add","args":[{"value":1e308},{"value":1e308}]})"),
+                                     ValueType::Number);
+        check(c.q == Quality::Bad && c.value.isNull(), QStringLiteral("overflow is bad"));
+        const Sample d = ev.evalExpr(parse(R"({"op":"gt","args":[{"op":"div","args":[{"value":1},{"value":0}]},{"value":0}]})"),
+                                     ValueType::Bool);
+        check(d.q == Quality::Bad, QStringLiteral("div by 0 inside a comparison is bad"));
+    }
 
     // 65 nodes: or of 64 constants
     {
