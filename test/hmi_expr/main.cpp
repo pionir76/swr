@@ -118,6 +118,23 @@ static void runExpr(const QJsonObject &doc)
                 return in;   // Missing
             const QJsonObject t   = tags.value(id).toObject();
             const QJsonObject src = t.value(QLatin1String("source")).toObject();
+            if (t.value(QLatin1String("kind")).toString() == QLatin1String("param")) {
+                // Current value from the case inputs, else the initial value
+                ParamDef def;
+                QString err;
+                check(parseParamDef(src.value(QLatin1String("valueType")), src.value(QLatin1String("initial")),
+                                    t.value(QLatin1String("min")), t.value(QLatin1String("max")),
+                                    t.value(QLatin1String("decimals")), def, err) == ParamStatus::Ok,
+                      QStringLiteral("param tag ") + id, err);
+                in.kind = TagInput::Kind::Param;
+                const QJsonObject inp = inputs.value(id).toObject();
+                Quality q = Quality::Good;
+                if (inp.contains(QLatin1String("q")))
+                    qualityFromString(inp.value(QLatin1String("q")).toString(), q);
+                in.fixedSample = Sample{ inp.contains(QLatin1String("value")) ? inp.value(QLatin1String("value"))
+                                                                              : def.initial, q };
+                return in;
+            }
             if (t.value(QLatin1String("kind")).toString() == QLatin1String("expr")) {
                 in.kind = TagInput::Kind::Expr;
                 valueTypeFromString(src.value(QLatin1String("valueType")).toString(), in.valueType);
@@ -215,6 +232,76 @@ static void runLocal()
         check(!decimalsFromJson(QJsonValue(-1), d), QStringLiteral("decimals -1 rejected"));
         check(!decimalsFromJson(QJsonValue(1.5), d), QStringLiteral("decimals 1.5 rejected"));
         check(!decimalsFromJson(QJsonValue(QStringLiteral("2")), d), QStringLiteral("decimals \"2\" rejected"));
+    }
+
+    // Setting (param) tags
+    {
+        const QJsonValue U(QJsonValue::Undefined), N(QJsonValue::Null);
+        ParamDef def; QString err;
+        auto parse = [&](const char *vt, const QJsonValue &init, const QJsonValue &mn, const QJsonValue &mx,
+                         const QJsonValue &dec) {
+            return parseParamDef(QJsonValue(QString::fromLatin1(vt)), init, mn, mx, dec, def, err);
+        };
+        check(parse("number", 80, 0, 150, 1) == ParamStatus::Ok && def.initial.toDouble() == 80,
+              QStringLiteral("param: number ok"));
+        check(parse("nope", 80, U, U, U) == ParamStatus::BadField, QStringLiteral("param: bad valueType 400"));
+        check(parse("number", U, U, U, U) == ParamStatus::BadField, QStringLiteral("param: no initial 400"));
+        check(parse("number", 80, QJsonValue(QStringLiteral("0")), U, U) == ParamStatus::BadField,
+              QStringLiteral("param: min as text 400"));
+        check(parse("number", QJsonValue(QStringLiteral("80")), U, U, U) == ParamStatus::BadRule,
+              QStringLiteral("param: number initial as text 422"));
+        check(parse("number", N, U, U, U) == ParamStatus::BadRule, QStringLiteral("param: null initial 422"));
+        check(parse("number", 200, 0, 150, U) == ParamStatus::BadRule, QStringLiteral("param: initial out of range 422"));
+        check(parse("number", 5, 10, 0, U) == ParamStatus::BadRule, QStringLiteral("param: min > max 422"));
+        check(parse("number", 5, U, U, 7) == ParamStatus::BadRule, QStringLiteral("param: decimals 7 422"));
+        check(parse("number", 1.25, U, U, 1) == ParamStatus::Ok && def.initial.toDouble() == 1.3,
+              QStringLiteral("param: initial rounded"));
+        check(parse("bool", 1, U, U, U) == ParamStatus::BadRule, QStringLiteral("param: bool initial 1 422"));
+        check(parse("bool", false, QJsonValue(QStringLiteral("x")), U, 9) == ParamStatus::Ok && !def.hasMin
+              && def.decimals == -1, QStringLiteral("param: bool ignores min / decimals"));
+        check(parse("string", QString(64, QLatin1Char('a')), U, U, U) == ParamStatus::Ok,
+              QStringLiteral("param: string 64 ok"));
+        check(parse("string", QString(65, QLatin1Char('a')), U, U, U) == ParamStatus::BadRule,
+              QStringLiteral("param: string 65 422"));
+
+        // write
+        parse("number", 80, 0, 150, 1);
+        QJsonValue out; bool oor = false;
+        check(acceptParamValue(def, 85.56, QStringLiteral("value"), out, err, oor) && out.toDouble() == 85.6,
+              QStringLiteral("param write: rounded"));
+        check(acceptParamValue(def, 150.04, QStringLiteral("value"), out, err, oor) && out.toDouble() == 150, QStringLiteral("param write: 150.04 rounds into range"));
+        check(!acceptParamValue(def, 150.06, QStringLiteral("value"), out, err, oor) && oor && out.toDouble() == 150.1,
+              QStringLiteral("param write: out of range after rounding"));
+        check(!acceptParamValue(def, QStringLiteral("85"), QStringLiteral("value"), out, err, oor) && !oor,
+              QStringLiteral("param write: text to number tag"));
+        check(acceptParamValue(def, -0.04, QStringLiteral("value"), out, err, oor)
+              && !std::signbit(out.toDouble()), QStringLiteral("param write: -0 is 0"));
+
+        // definition change
+        ParamCarry how;
+        check(carryParamValue(def, true, 85.5, how).toDouble() == 85.5 && how == ParamCarry::Kept,
+              QStringLiteral("param carry: kept"));
+        parse("number", 80, 0, 100, 0);
+        check(carryParamValue(def, true, 85.5, how).toDouble() == 86 && how == ParamCarry::Rounded,
+              QStringLiteral("param carry: rounded"));
+        check(carryParamValue(def, true, 120, how).toDouble() == 100 && how == ParamCarry::Clamped,
+              QStringLiteral("param carry: clamped to max"));
+        check(carryParamValue(def, true, -5, how).toDouble() == 0 && how == ParamCarry::Clamped,
+              QStringLiteral("param carry: clamped to min"));
+        check(carryParamValue(def, false, true, how).toDouble() == 80 && how == ParamCarry::TypeChanged,
+              QStringLiteral("param carry: type changed"));
+        check(carryParamValue(def, true, QJsonValue(QJsonValue::Undefined), how).toDouble() == 80
+              && how == ParamCarry::Reset, QStringLiteral("param carry: unreadable"));
+
+        // storage
+        check(paramToText(85.5) == QStringLiteral("85.5") && paramToText(80) == QStringLiteral("80")
+              && paramToText(true) == QStringLiteral("true")
+              && paramToText(QStringLiteral("주간")) == QStringLiteral("\"주간\""),
+              QStringLiteral("param text: write"), paramToText(QStringLiteral("주간")));
+        check(paramFromText(QStringLiteral("85.5")).toDouble() == 85.5 && paramFromText(QStringLiteral("false")) == QJsonValue(false)
+              && paramFromText(QStringLiteral("\"주간\"")) == QJsonValue(QStringLiteral("주간"))
+              && paramFromText(QString()).isUndefined() && paramFromText(QStringLiteral("1,2")).isUndefined(),
+              QStringLiteral("param text: read"));
     }
 
     // -0 never leaves a number result (sameValue cannot tell -0 from 0)

@@ -2961,6 +2961,30 @@ static bool isExprTag(const Model::HmiTag &t)
     return t.kind == QLatin1String("expr");
 }
 
+static bool isParamTag(const Model::HmiTag &t)
+{
+    return t.kind == QLatin1String("param");
+}
+
+static bool isRegisterTag(const Model::HmiTag &t)
+{
+    return t.kind == QLatin1String("register");
+}
+
+// The definition of a stored setting tag (checked when it was saved)
+static Hmi::ParamDef paramDefOf(const Model::HmiTag &t)
+{
+    Hmi::ParamDef def;
+    Hmi::valueTypeFromString(t.valueType, def.vt);
+    def.initial  = Hmi::paramFromText(t.paramInit);
+    def.hasMin   = t.hasMin;
+    def.min      = t.minValue;
+    def.hasMax   = t.hasMax;
+    def.max      = t.maxValue;
+    def.decimals = t.decimals;
+    return def;
+}
+
 // Stored ASTs are always JSON objects (validateExpr requires an object root).
 // Parsed once per distinct text: the text itself is the key, so an edited
 // expression just misses the cache. Only the HTTP thread calls this.
@@ -3020,6 +3044,25 @@ static QJsonObject hmiTagToJson(const Model::HmiTag &t, const Store::DeviceList 
     o[QLatin1String("id")]   = t.id;
     o[QLatin1String("name")] = t.name;
     o[QLatin1String("kind")] = t.kind;
+
+    if (isParamTag(t)) {
+        const bool number = t.valueType == QLatin1String("number");
+        QJsonObject src;
+        src[QLatin1String("valueType")] = t.valueType;
+        src[QLatin1String("initial")]   = Hmi::paramFromText(t.paramInit);
+        const QJsonValue value = Hmi::paramFromText(t.paramValue);
+        o[QLatin1String("source")]    = src;
+        o[QLatin1String("value")]     = value.isUndefined() ? QJsonValue() : value;
+        o[QLatin1String("unit")]      = t.unit.isEmpty() ? QJsonValue() : t.unit;
+        o[QLatin1String("decimals")]  = (number && t.decimals >= 0) ? QJsonValue(t.decimals) : QJsonValue();
+        o[QLatin1String("min")]       = (number && t.hasMin) ? QJsonValue(t.minValue) : QJsonValue();
+        o[QLatin1String("max")]       = (number && t.hasMax) ? QJsonValue(t.maxValue) : QJsonValue();
+        o[QLatin1String("scale")]     = QJsonValue();
+        o[QLatin1String("access")]    = QStringLiteral("rw");
+        o[QLatin1String("createdAt")] = t.createdAt;
+        o[QLatin1String("updatedAt")] = t.updatedAt;
+        return o;
+    }
 
     if (isExprTag(t)) {
         const QJsonValue expr = exprFromText(t.expr);
@@ -3118,14 +3161,38 @@ static bool parseHmiTagBody(const QJsonObject &body, const QString &defaultKind,
     if (body.contains(QLatin1String("kind"))) {
         const QJsonValue k = body.value(QLatin1String("kind"));
         if (!k.isString() || (k.toString() != QLatin1String("register") &&
-                              k.toString() != QLatin1String("expr"))) {
-            err.message = QStringLiteral("'kind' must be \"register\" or \"expr\"");
+                              k.toString() != QLatin1String("expr") &&
+                              k.toString() != QLatin1String("param"))) {
+            err.message = QStringLiteral("'kind' must be \"register\", \"expr\" or \"param\"");
             return false;
         }
         tag.kind = k.toString();
     }
 
     const QJsonObject src = body.value(QLatin1String("source")).toObject();
+
+    if (isParamTag(tag)) {
+        // access / scale do not apply; min / max / decimals / unit only to
+        // number tags. The current value is set by the caller.
+        Hmi::ParamDef def;
+        const Hmi::ParamStatus st = Hmi::parseParamDef(
+            src.value(QLatin1String("valueType")), src.value(QLatin1String("initial")),
+            body.value(QLatin1String("min")), body.value(QLatin1String("max")),
+            body.value(QLatin1String("decimals")), def, err.message);
+        if (st != Hmi::ParamStatus::Ok) {
+            if (err.message.startsWith(QLatin1String("'valueType'")) ||
+                err.message.startsWith(QLatin1String("'initial'")))
+                err.message = QStringLiteral("'source.") + err.message.mid(1);
+            err.status = st == Hmi::ParamStatus::BadRule
+                         ? QHttpServerResponse::StatusCode::UnprocessableEntity
+                         : QHttpServerResponse::StatusCode::BadRequest;
+            return false;
+        }
+        if (body.contains(QLatin1String("unit")))
+            tag.unit = body.value(QLatin1String("unit")).toString();
+        DataCollection::Database::fillHmiParamTag(tag, def);
+        return true;
+    }
 
     if (isExprTag(tag)) {
         // min / max / scale / access do not apply to computed tags and are ignored
@@ -3324,6 +3391,20 @@ static Hmi::TagLookup makeHmiLookup(HmiEvalContext &ctx,
             return in;   // Missing
 
         const Model::HmiTag &t = it.value();
+        if (isParamTag(t)) {
+            in.kind = Hmi::TagInput::Kind::Param;
+            Hmi::valueTypeFromString(t.valueType, in.valueType);
+            auto ov = ctx.overrides.constFind(id);
+            if (ov != ctx.overrides.constEnd()) {
+                in.fixedSample = ov->fixedSample;
+            } else {
+                const QJsonValue v = Hmi::paramFromText(t.paramValue);
+                in.fixedSample = v.isUndefined()
+                                 ? Hmi::Sample{ QJsonValue(QJsonValue::Null), Hmi::Quality::Bad }
+                                 : Hmi::Sample{ v, Hmi::Quality::Good };
+            }
+            return in;
+        }
         if (isExprTag(t)) {
             in.kind = Hmi::TagInput::Kind::Expr;
             Hmi::valueTypeFromString(t.valueType, in.valueType);
@@ -3408,7 +3489,7 @@ QHttpServerResponse ApiServer::handlePostHmiTag(const QHttpServerRequest &reques
     if (!parseHmiTagBody(body, QStringLiteral("register"), tag, bodyErr))
         return hmiTagBodyError(bodyErr);
 
-    if (!isExprTag(tag)) {
+    if (isRegisterTag(tag)) {
         bool regFound = false;
         m_deviceList->findByRegisterId(tag.registerId, regFound);
         if (!regFound) {
@@ -3432,6 +3513,8 @@ QHttpServerResponse ApiServer::handlePostHmiTag(const QHttpServerRequest &reques
     }
     if (isExprTag(tag) && !checkExprTagAgainst(tag, all, bodyErr))
         return hmiTagBodyError(bodyErr);
+    if (isParamTag(tag))
+        tag.paramValue = tag.paramInit;
 
     if (!m_db->insertHmiTag(tag, dbErr)) {
         QJsonObject e; e[QLatin1String("error")] = dbErr;
@@ -3496,7 +3579,7 @@ QHttpServerResponse ApiServer::handlePutHmiTag(const QHttpServerRequest &request
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
     }
 
-    if (!isExprTag(tag)) {
+    if (isRegisterTag(tag)) {
         bool regFound = false;
         m_deviceList->findByRegisterId(tag.registerId, regFound);
         if (!regFound) {
@@ -3514,10 +3597,36 @@ QHttpServerResponse ApiServer::handlePutHmiTag(const QHttpServerRequest &request
     if (isExprTag(tag) && !checkExprTagAgainst(tag, all, bodyErr))
         return hmiTagBodyError(bodyErr);
 
+    //-----------------------------------------------------------//
+    // Setting tag: the current value is state, kept across a definition
+    // change unless the type changed (back to the initial), the range
+    // narrowed (moved to the nearer end) or the digits changed (rounded).
+    //-----------------------------------------------------------//
+    QString paramLog;
+    if (isParamTag(tag)) {
+        const QJsonValue oldValue = Hmi::paramFromText(existing.paramValue);
+        Hmi::ParamCarry how = Hmi::ParamCarry::Kept;
+        const QJsonValue newValue = Hmi::carryParamValue(paramDefOf(tag),
+                                                         existing.valueType == tag.valueType,
+                                                         oldValue, how);
+        tag.paramValue = Hmi::paramToText(newValue);
+        if (how != Hmi::ParamCarry::Kept) {
+            const char *why = how == Hmi::ParamCarry::TypeChanged ? "type changed"
+                            : how == Hmi::ParamCarry::Clamped     ? "range changed"
+                            : how == Hmi::ParamCarry::Rounded     ? "decimals changed"
+                                                                  : "reset to initial";
+            paramLog = QStringLiteral("HMI param %1: %2 → %3 (%4, %5)")
+                           .arg(id, Hmi::paramLogText(oldValue), Hmi::paramLogText(newValue),
+                                QLatin1String(why), sessionUsername(request));
+        }
+    }
+
     if (!m_db->updateHmiTag(tag, dbErr)) {
         QJsonObject e; e[QLatin1String("error")] = dbErr;
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
     }
+    if (!paramLog.isEmpty())
+        Util::Logger::info(paramLog);
 
     bool ok = false;
     const Model::HmiTag updated = m_db->loadHmiTag(id, ok, dbErr);
@@ -3592,13 +3701,13 @@ QHttpServerResponse ApiServer::handleGetHmiValues(const QHttpServerRequest &requ
         if (!requested.isEmpty() && !requested.contains(t.id))
             continue;
 
-        if (isExprTag(t)) {
+        if (isExprTag(t) || isParamTag(t)) {
             const Hmi::Sample s = evaluator.evalTag(t.id);
             QJsonObject val;
             val[QLatin1String("value")]  = s.value;
             val[QLatin1String("q")]      = Hmi::qualityToString(s.q);
             val[QLatin1String("unit")]   = t.unit;
-            val[QLatin1String("access")] = QStringLiteral("r");
+            val[QLatin1String("access")] = isParamTag(t) ? QStringLiteral("rw") : QStringLiteral("r");
             values[t.id] = val;
             continue;
         }
@@ -3699,9 +3808,9 @@ QHttpServerResponse ApiServer::handlePostHmiEval(const QHttpServerRequest &reque
             return badRequest(QStringLiteral("inputs.%1.q must be good, normal, bad or disabled").arg(it.key()));
 
         Hmi::TagInput ov;
-        if (isExprTag(tagIt.value())) {
+        if (!isRegisterTag(tagIt.value())) {
             if (!in.contains(QLatin1String("value")))
-                return badRequest(QStringLiteral("inputs.%1: a computed tag takes 'value'").arg(it.key()));
+                return badRequest(QStringLiteral("inputs.%1: a computed or setting tag takes 'value'").arg(it.key()));
             const QJsonValue v = in.value(QLatin1String("value"));
             if (v.isArray() || v.isObject())
                 return badRequest(QStringLiteral("inputs.%1.value must be a number, string, true/false or null").arg(it.key()));
@@ -3759,11 +3868,14 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
     }
     const QJsonObject body = doc.object();
 
-    // The frontend scales; the server writes the raw word as is.
-    if (!body.contains(QLatin1String("tag")) || !body.contains(QLatin1String("raw"))) {
-        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required fields: tag, raw");
+    // Register tags take "raw" (the frontend scales; the server writes the
+    // raw word as is). Setting tags take "value".
+    if (!body.contains(QLatin1String("tag"))) {
+        QJsonObject e; e[QLatin1String("error")] = QStringLiteral("Missing required field: tag");
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
     }
+    const bool hasRaw   = body.contains(QLatin1String("raw"));
+    const bool hasValue = body.contains(QLatin1String("value"));
 
     const QString tagId = body.value(QLatin1String("tag")).toString().trimmed();
     QString dbErr;
@@ -3778,6 +3890,57 @@ QHttpServerResponse ApiServer::handlePostHmiWrite(const QHttpServerRequest &requ
         QJsonObject e; e[QLatin1String("error")] =
             QStringLiteral("HMI tag '%1' is a computed tag and cannot be written").arg(tagId);
         return QHttpServerResponse(e, QHttpServerResponse::StatusCode::MethodNotAllowed);
+    }
+
+    //-----------------------------------------------------------//
+    // Setting tag: type check, round to decimals, range check, store.
+    // Not a device write: the next values / evaluation sees it.
+    //-----------------------------------------------------------//
+    if (isParamTag(tag)) {
+        if (hasRaw || !hasValue) {
+            QJsonObject e; e[QLatin1String("error")] =
+                QStringLiteral("HMI tag '%1' is a setting tag: send 'value', not 'raw'").arg(tagId);
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
+        }
+        const Hmi::ParamDef def = paramDefOf(tag);
+        QJsonValue value;
+        QString    err;
+        bool       outOfRange = false;
+        if (!Hmi::acceptParamValue(def, body.value(QLatin1String("value")), QStringLiteral("value"),
+                                   value, err, outOfRange)) {
+            QJsonObject e;
+            e[QLatin1String("error")] = outOfRange
+                ? QStringLiteral("value %1 is outside the allowed range of HMI tag '%2'")
+                      .arg(Hmi::toText(value), tagId)
+                : err;
+            if (outOfRange) {
+                e[QLatin1String("min")]   = def.hasMin ? QJsonValue(def.min) : QJsonValue();
+                e[QLatin1String("max")]   = def.hasMax ? QJsonValue(def.max) : QJsonValue();
+                e[QLatin1String("value")] = value;
+            }
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::UnprocessableEntity);
+        }
+
+        const QJsonValue oldValue = Hmi::paramFromText(tag.paramValue);
+        if (!m_db->setHmiParamValue(tagId, Hmi::paramToText(value), dbErr)) {
+            QJsonObject e; e[QLatin1String("error")] = dbErr;
+            return QHttpServerResponse(e, QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        Util::Logger::info(QStringLiteral("HMI param %1: %2 → %3 (%4)")
+                               .arg(tagId, Hmi::paramLogText(oldValue), Hmi::paramLogText(value),
+                                    sessionUsername(request)));
+
+        QJsonObject resp;
+        resp[QLatin1String("ok")]    = true;
+        resp[QLatin1String("tag")]   = tagId;
+        resp[QLatin1String("value")] = value;
+        return QHttpServerResponse(resp);
+    }
+
+    if (hasValue || !hasRaw) {
+        QJsonObject e; e[QLatin1String("error")] =
+            QStringLiteral("HMI tag '%1' is a register tag: send 'raw', not 'value'").arg(tagId);
+        return QHttpServerResponse(e, QHttpServerResponse::StatusCode::BadRequest);
     }
 
     bool regFound = false;
@@ -4321,6 +4484,7 @@ struct HmiImportFile {
     QStringList warnings;
     int         screenCount = 0;
     QHash<QString, QSet<QString>> exprRefs;   // computed tags in the file -> their refs
+    QSet<QString> paramIds;                   // setting tags in the file
     QSet<QString> unknownKind;                // tags of a kind this device does not know
     QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::Ok;
     QString     error;
@@ -4461,6 +4625,20 @@ bool parseHmiImportFile(const QByteArray &body, int maxScreens, HmiImportFile &f
                                      QStringLiteral("tag '%1': 'decimals' must be an integer 0–%2 or null")
                                          .arg(id).arg(Hmi::kDecimalsMax));
             f.exprRefs.insert(id, info.refs);
+        } else if (kind == QLatin1String("param")) {
+            Hmi::ParamDef def;
+            QString err;
+            if (Hmi::parseParamDef(t.value(QLatin1String("valueType")), t.value(QLatin1String("initial")),
+                                   t.value(QLatin1String("minValue")), t.value(QLatin1String("maxValue")),
+                                   t.value(QLatin1String("decimals")), def, err) != Hmi::ParamStatus::Ok)
+                return hmiImportFail(f, Code::BadRequest, QStringLiteral("tag '%1': %2").arg(id, err));
+            QJsonValue value;
+            bool outOfRange = false;
+            if (!Hmi::acceptParamValue(def, t.value(QLatin1String("value")), QStringLiteral("value"),
+                                       value, err, outOfRange))
+                f.warnings << QStringLiteral("Setting tag '%1' has a missing or invalid value (%2); "
+                                             "it will be set to its initial value").arg(id, err);
+            f.paramIds.insert(id);
         } else if (kind != QLatin1String("register")) {
             f.warnings << QStringLiteral("Tag '%1' has kind '%2', which this device does not know; "
                                          "it will be skipped").arg(id, kind);
@@ -4593,7 +4771,7 @@ QHttpServerResponse ApiServer::handlePostHmiImport(const QHttpServerRequest &req
     for (const QJsonValue &v : tags) {
         const QJsonObject t     = v.toObject();
         const QString     id    = t.value(QLatin1String("id")).toString();
-        if (file.exprRefs.contains(id)) {
+        if (file.exprRefs.contains(id) || file.paramIds.contains(id)) {
             kept.insert(id);
             continue;
         }
@@ -4647,6 +4825,7 @@ QHttpServerResponse ApiServer::handlePostHmiImport(const QHttpServerRequest &req
         tagInfo[QLatin1String("linked")]     = linked;
         tagInfo[QLatin1String("missing")]    = missing;
         tagInfo[QLatin1String("expr")]       = file.exprRefs.size();
+        tagInfo[QLatin1String("param")]      = file.paramIds.size();
         tagInfo[QLatin1String("brokenExpr")] = brokenExpr;
 
         QJsonObject cur;

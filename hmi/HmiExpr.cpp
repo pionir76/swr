@@ -1,6 +1,7 @@
 #include "HmiExpr.h"
 
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
 #include <QRegularExpression>
@@ -515,6 +516,12 @@ Sample Evaluator::evalTag(const QString &id)
         break;
     }
 
+    case TagInput::Kind::Param: {
+        const Sample &f = in.fixedSample;
+        used.sample = (f.q == Quality::Bad || f.value.isNull() || f.value.isUndefined()) ? kBad : f;
+        break;
+    }
+
     case TagInput::Kind::Expr:
         if (in.fixed) {
             used.sample = in.fixedSample.q == Quality::Bad ? kBad : in.fixedSample;
@@ -635,6 +642,153 @@ Sample Evaluator::evalNode(const QJsonValue &node)
         return ok ? result(r) : kBad;
 
     return kBad;   // unknown operator or wrong argument count
+}
+
+//-----------------------------------------------------------//
+// Setting (param) tags
+//-----------------------------------------------------------//
+static double noNegZero(double d)
+{
+    return d == 0.0 ? 0.0 : d;
+}
+
+ParamStatus parseParamDef(const QJsonValue &valueType, const QJsonValue &initial,
+                          const QJsonValue &min, const QJsonValue &max,
+                          const QJsonValue &decimals, ParamDef &out, QString &error)
+{
+    out = ParamDef();
+    if (!valueTypeFromString(valueType.toString(), out.vt)) {
+        error = QStringLiteral("'valueType' must be \"bool\", \"number\" or \"string\"");
+        return ParamStatus::BadField;
+    }
+    if (initial.isUndefined()) {
+        error = QStringLiteral("'initial' is required");
+        return ParamStatus::BadField;
+    }
+
+    if (out.vt == ValueType::Number) {
+        auto limit = [&error](const QJsonValue &v, const char *name, bool &has, double &d) {
+            if (v.isUndefined() || v.isNull())
+                return true;
+            if (!v.isDouble()) {
+                error = QStringLiteral("'%1' must be a number or null").arg(QLatin1String(name));
+                return false;
+            }
+            has = true;
+            d   = v.toDouble();
+            return true;
+        };
+        if (!limit(min, "min", out.hasMin, out.min) || !limit(max, "max", out.hasMax, out.max))
+            return ParamStatus::BadField;
+        if (!decimalsFromJson(decimals, out.decimals)) {
+            error = QStringLiteral("'decimals' must be an integer 0–%1 or null").arg(kDecimalsMax);
+            return ParamStatus::BadRule;
+        }
+        if (out.hasMin && out.hasMax && out.min > out.max) {
+            error = QStringLiteral("'min' (%1) is greater than 'max' (%2)")
+                        .arg(toText(out.min), toText(out.max));
+            return ParamStatus::BadRule;
+        }
+    }
+
+    bool outOfRange = false;
+    if (!acceptParamValue(out, initial, QStringLiteral("initial"), out.initial, error, outOfRange))
+        return ParamStatus::BadRule;
+    return ParamStatus::Ok;
+}
+
+bool acceptParamValue(const ParamDef &def, const QJsonValue &v, const QString &what,
+                      QJsonValue &out, QString &error, bool &outOfRange)
+{
+    outOfRange = false;
+    switch (def.vt) {
+    case ValueType::Bool:
+        if (!v.isBool()) {
+            error = QStringLiteral("'%1' must be true or false").arg(what);
+            return false;
+        }
+        out = v;
+        return true;
+
+    case ValueType::String:
+        if (!v.isString()) {
+            error = QStringLiteral("'%1' must be a string").arg(what);
+            return false;
+        }
+        if (v.toString().size() > kParamTextMax) {
+            error = QStringLiteral("'%1' must be at most %2 characters").arg(what).arg(kParamTextMax);
+            return false;
+        }
+        out = v;
+        return true;
+
+    case ValueType::Number:
+        break;
+    }
+
+    if (!v.isDouble()) {
+        error = QStringLiteral("'%1' must be a number").arg(what);
+        return false;
+    }
+    double d = v.toDouble();
+    if (def.decimals >= 0)
+        d = roundTo(d, def.decimals);
+    d   = noNegZero(d);
+    out = d;
+    if ((def.hasMin && d < def.min) || (def.hasMax && d > def.max)) {
+        outOfRange = true;
+        error = QStringLiteral("'%1' %2 is outside the allowed range").arg(what, toText(d));
+        return false;
+    }
+    return true;
+}
+
+QJsonValue carryParamValue(const ParamDef &def, bool sameType, const QJsonValue &oldValue,
+                           ParamCarry &how)
+{
+    if (!sameType) {
+        how = ParamCarry::TypeChanged;
+        return def.initial;
+    }
+    QJsonValue out;
+    QString    error;
+    bool       outOfRange = false;
+    if (acceptParamValue(def, oldValue, QStringLiteral("value"), out, error, outOfRange)) {
+        how = (out == oldValue) ? ParamCarry::Kept : ParamCarry::Rounded;
+        return out;
+    }
+    if (!outOfRange) {
+        how = ParamCarry::Reset;   // unreadable stored value
+        return def.initial;
+    }
+    const double d = out.toDouble();
+    how = ParamCarry::Clamped;
+    return (def.hasMin && d < def.min) ? def.min : def.max;
+}
+
+QString paramToText(const QJsonValue &v)
+{
+    const QByteArray a = QJsonDocument(QJsonArray{ v }).toJson(QJsonDocument::Compact);
+    return QString::fromUtf8(a.mid(1, a.size() - 2));   // strip [ ]
+}
+
+QJsonValue paramFromText(const QString &text)
+{
+    if (text.isEmpty())
+        return QJsonValue(QJsonValue::Undefined);
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray("[") + text.toUtf8() + "]");
+    if (!doc.isArray() || doc.array().size() != 1)
+        return QJsonValue(QJsonValue::Undefined);
+    return doc.array().at(0);
+}
+
+QString paramLogText(const QJsonValue &v)
+{
+    if (v.isString())
+        return QLatin1Char('"') + v.toString() + QLatin1Char('"');
+    if (v.isUndefined())
+        return QStringLiteral("(none)");
+    return toText(v);
 }
 
 } // namespace Hmi

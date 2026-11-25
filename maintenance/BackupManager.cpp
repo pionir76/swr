@@ -4,6 +4,7 @@
 #include "../config/AppConfig.h"
 #include "../data_collection/database/DeviceDatabase.h"
 #include "../data_collection/model/DeviceModels.h"
+#include "../hmi/HmiExpr.h"
 
 #include <QBuffer>
 #include <QByteArray>
@@ -329,6 +330,19 @@ QByteArray BackupManager::buildHmi(const DataCollection::Database::DeviceDatabas
         // Computed tags have no register. Firmware older than computed
         // tags skips them on import because they have no unifiedAddress.
         //-----------------------------------------------------------//
+        if (t.kind == QLatin1String("param")) {
+            const bool number = t.valueType == QLatin1String("number");
+            obj[QLatin1String("valueType")] = t.valueType;
+            obj[QLatin1String("initial")]   = Hmi::paramFromText(t.paramInit);
+            const QJsonValue value = Hmi::paramFromText(t.paramValue);
+            if (!value.isUndefined()) obj[QLatin1String("value")] = value;
+            if (!t.unit.isEmpty())    obj[QLatin1String("unit")]  = t.unit;
+            if (number && t.hasMin)   obj[QLatin1String("minValue")] = t.minValue;
+            if (number && t.hasMax)   obj[QLatin1String("maxValue")] = t.maxValue;
+            if (number && t.decimals >= 0) obj[QLatin1String("decimals")] = t.decimals;
+            tagArr.append(obj);
+            continue;
+        }
         if (t.kind == QLatin1String("expr")) {
             obj[QLatin1String("valueType")] = t.valueType;
             obj[QLatin1String("expr")]      = QJsonDocument::fromJson(t.expr.toUtf8()).object();

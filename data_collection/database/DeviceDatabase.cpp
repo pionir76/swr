@@ -51,24 +51,26 @@ static QString hmiTagsTableSql(const QString &table)
 
 static const char kHmiTagColumns[] =
     "id,name,register_id,unit,min_value,max_value,scale,access,created_at,updated_at,"
-    "kind,value_type,expr,decimals";
+    "kind,value_type,expr,decimals,param_init,param_value";
 
 // Binds name, kind, register_id, unit, min, max, scale, access, value_type, expr,
-// decimals. register tags carry no value_type/expr; expr tags carry no register
-// or overrides; decimals is kept for number expr tags only.
+// decimals, param_init, param_value. register tags carry no value_type/expr;
+// expr tags carry no register or overrides; min/max belong to register and
+// param tags; decimals is kept for number expr / param tags only.
 static void bindHmiTagFields(QSqlQuery &q, const Model::HmiTag &tag)
 {
     const QVariant nullText(QMetaType(QMetaType::QString));
     const QVariant nullReal(QMetaType(QMetaType::Double));
     const QVariant nullInt(QMetaType(QMetaType::Int));
     const bool isRegister = tag.kind == QLatin1String("register");
+    const bool isParam    = tag.kind == QLatin1String("param");
 
     q.addBindValue(tag.name);
     q.addBindValue(tag.kind);
     q.addBindValue(isRegister ? QVariant(tag.registerId) : nullInt);
     q.addBindValue(tag.unit.isEmpty()              ? nullText : QVariant(tag.unit));
-    q.addBindValue(isRegister && tag.hasMin        ? QVariant(tag.minValue) : nullReal);
-    q.addBindValue(isRegister && tag.hasMax        ? QVariant(tag.maxValue) : nullReal);
+    q.addBindValue((isRegister || isParam) && tag.hasMin ? QVariant(tag.minValue) : nullReal);
+    q.addBindValue((isRegister || isParam) && tag.hasMax ? QVariant(tag.maxValue) : nullReal);
     q.addBindValue(isRegister && tag.hasScale      ? QVariant(tag.scale)    : nullReal);
     q.addBindValue(isRegister && !tag.access.isEmpty() ? QVariant(tag.access) : nullText);
     q.addBindValue(isRegister || tag.valueType.isEmpty() ? nullText : QVariant(tag.valueType));
@@ -76,6 +78,27 @@ static void bindHmiTagFields(QSqlQuery &q, const Model::HmiTag &tag)
     const bool hasDecimals = !isRegister && tag.valueType == QLatin1String("number")
                           && tag.decimals >= 0;
     q.addBindValue(hasDecimals ? QVariant(tag.decimals) : nullInt);
+    q.addBindValue(isParam && !tag.paramInit.isEmpty()  ? QVariant(tag.paramInit)  : nullText);
+    q.addBindValue(isParam && !tag.paramValue.isEmpty() ? QVariant(tag.paramValue) : nullText);
+}
+
+void fillHmiParamTag(Model::HmiTag &tag, const Hmi::ParamDef &def)
+{
+    const bool number = def.vt == Hmi::ValueType::Number;
+    tag.kind      = QStringLiteral("param");
+    tag.registerId = -1;
+    tag.valueType = Hmi::valueTypeToString(def.vt);
+    tag.expr.clear();
+    tag.hasMin    = number && def.hasMin;
+    tag.minValue  = def.min;
+    tag.hasMax    = number && def.hasMax;
+    tag.maxValue  = def.max;
+    tag.hasScale  = false;
+    tag.access.clear();
+    tag.decimals  = number ? def.decimals : -1;
+    if (!number)
+        tag.unit.clear();
+    tag.paramInit = Hmi::paramToText(def.initial);
 }
 
 
@@ -1780,8 +1803,10 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
     //-----------------------------------------------------------//
     // Tags — resolve unifiedAddress back to the current register id
     //-----------------------------------------------------------//
-    // Register tags first, then expr tags (which refer to them by id).
+    // Register tags first, then param tags, then expr tags (which refer
+    // to both by id).
     int droppedTags = 0;
+    QList<QJsonObject> paramTags;
     QList<QJsonObject> exprTags;
     QStringList unknownKinds;
     for (const QJsonValue &v : tags) {
@@ -1793,6 +1818,10 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
         const QString kind = obj[QLatin1String("kind")].toString(QStringLiteral("register"));
         if (kind == QLatin1String("expr")) {
             exprTags.append(obj);
+            continue;
+        }
+        if (kind == QLatin1String("param")) {
+            paramTags.append(obj);
             continue;
         }
         if (kind != QLatin1String("register")) {
@@ -1857,6 +1886,57 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
     }
 
     //-----------------------------------------------------------//
+    // Param tags: definition and current value. The HMI import API
+    // rejects bad definitions before getting here; a system restore
+    // skips them with a warning. A missing or bad value falls back to
+    // the initial value (the value is state, the definition is not).
+    //-----------------------------------------------------------//
+    QStringList invalidParam, resetParam;
+    for (const QJsonObject &obj : paramTags) {
+        const QString id = obj[QLatin1String("id")].toString();
+        Hmi::ParamDef def;
+        QString err;
+        if (Hmi::parseParamDef(obj[QLatin1String("valueType")], obj[QLatin1String("initial")],
+                               obj[QLatin1String("minValue")], obj[QLatin1String("maxValue")],
+                               obj[QLatin1String("decimals")], def, err) != Hmi::ParamStatus::Ok) {
+            invalidParam.append(QStringLiteral("%1 (%2)").arg(id, err));
+            continue;
+        }
+        QJsonValue value;
+        bool outOfRange = false;
+        if (!Hmi::acceptParamValue(def, obj[QLatin1String("value")], QStringLiteral("value"),
+                                   value, err, outOfRange)) {
+            value = def.initial;
+            resetParam.append(id);
+        }
+
+        Model::HmiTag tag;
+        tag.id    = id;
+        tag.name  = obj[QLatin1String("name")].toString(QStringLiteral(""));
+        tag.unit  = obj[QLatin1String("unit")].toString();
+        fillHmiParamTag(tag, def);
+        tag.paramValue = Hmi::paramToText(value);
+        q.prepare(QStringLiteral(
+            "INSERT INTO hmi_tags "
+            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,"
+            "param_init,param_value,id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        bindHmiTagFields(q, tag);
+        q.addBindValue(tag.id);
+        if (!q.exec()) {
+            error = q.lastError().text();
+            return false;
+        }
+    }
+    if (!invalidParam.isEmpty()) {
+        warnings << QStringLiteral("HMI setting tag(s) skipped — invalid definition: %1")
+                        .arg(invalidParam.join(QStringLiteral("; ")));
+    }
+    if (!resetParam.isEmpty()) {
+        warnings << QStringLiteral("HMI setting tag(s) with a missing or invalid value set to their initial value: %1")
+                        .arg(resetParam.join(QStringLiteral(", ")));
+    }
+
+    //-----------------------------------------------------------//
     // Expr tags. The HMI import API rejects bad expressions before
     // getting here; a system restore skips them with a warning instead
     // of failing the whole restore.
@@ -1909,8 +1989,8 @@ bool DeviceDatabase::replaceHmi(QSqlDatabase &db,
                                               .toJson(QJsonDocument::Compact));
         q.prepare(QStringLiteral(
             "INSERT INTO hmi_tags "
-            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"));
+            "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,"
+            "param_init,param_value,id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
         bindHmiTagFields(q, tag);
         q.addBindValue(tag.id);
         if (!q.exec()) {
@@ -2075,6 +2155,8 @@ static Model::HmiTag hmiTagFromQuery(const QSqlQuery &q)
     tag.valueType  = q.value(11).toString();
     tag.expr       = q.value(12).toString();
     tag.decimals   = q.value(13).isNull() ? -1 : q.value(13).toInt();
+    tag.paramInit  = q.value(14).toString();
+    tag.paramValue = q.value(15).toString();
     return tag;
 }
 
@@ -2113,8 +2195,8 @@ bool DeviceDatabase::insertHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "INSERT INTO hmi_tags "
-        "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"));
+        "(name,kind,register_id,unit,min_value,max_value,scale,access,value_type,expr,decimals,"
+        "param_init,param_value,id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
     bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }
@@ -2127,11 +2209,25 @@ bool DeviceDatabase::updateHmiTag(const Model::HmiTag &tag, QString &error)
     QSqlQuery q(db);
     q.prepare(QStringLiteral(
         "UPDATE hmi_tags SET name=?,kind=?,register_id=?,unit=?,min_value=?,max_value=?,scale=?,"
-        "access=?,value_type=?,expr=?,decimals=?,updated_at=CURRENT_TIMESTAMP WHERE id=?"));
+        "access=?,value_type=?,expr=?,decimals=?,param_init=?,param_value=?,"
+        "updated_at=CURRENT_TIMESTAMP WHERE id=?"));
     bindHmiTagFields(q, tag);
     q.addBindValue(tag.id);
     if (!q.exec()) { error = q.lastError().text(); return false; }
     if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI tag not found: %1").arg(tag.id); return false; }
+    return true;
+}
+
+bool DeviceDatabase::setHmiParamValue(const QString &id, const QString &valueText, QString &error)
+{
+    // The value is state, not definition: updated_at is left alone
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("UPDATE hmi_tags SET param_value=? WHERE id=? AND kind='param'"));
+    q.addBindValue(valueText);
+    q.addBindValue(id);
+    if (!q.exec()) { error = q.lastError().text(); return false; }
+    if (q.numRowsAffected() == 0) { error = QStringLiteral("HMI setting tag not found: %1").arg(id); return false; }
     return true;
 }
 

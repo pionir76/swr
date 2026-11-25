@@ -9,8 +9,14 @@
 #include <QString>
 #include <QStringList>
 
+namespace Hmi { struct ParamDef; }
+
 namespace DataCollection{
 namespace Database{
+
+// Copies a checked setting-tag definition into a tag (kind "param");
+// the current value is left to the caller.
+void fillHmiParamTag(Model::HmiTag &tag, const Hmi::ParamDef &def);
 
 class DeviceDatabase
 {
@@ -62,6 +68,8 @@ public:
     Model::HmiTag        loadHmiTag(const QString &id, bool &found, QString &error) const;
     bool insertHmiTag(const Model::HmiTag &tag, QString &error);
     bool updateHmiTag(const Model::HmiTag &tag, QString &error);
+    // Current value of a setting (param) tag, as JSON scalar text
+    bool setHmiParamValue(const QString &id, const QString &valueText, QString &error);
     bool deleteHmiTag(const QString &id, QString &error);
 
     // HMI Project / Screens

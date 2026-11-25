@@ -27,7 +27,8 @@ constexpr int kExprMaxNodes = 64;     // nodes in one expression
 constexpr int kExprMaxRefs  = 32;     // distinct tags one expression refers to
 constexpr int kExprMaxDepth = 8;      // expr -> expr chain length
 constexpr int kBitMax       = 15;     // bitAny / bitNone bit numbers
-constexpr int kDecimalsMax  = 6;      // decimals of a number expr tag
+constexpr int kDecimalsMax  = 6;      // decimals of a number expr / param tag
+constexpr int kParamTextMax = 64;     // length of a string param value (UTF-16 units)
 
 //-----------------------------------------------------------//
 // Raw word -> display value
@@ -100,7 +101,7 @@ struct Sample {
 
 // What the evaluator knows about one tag id.
 struct TagInput {
-    enum class Kind { Missing, Register, Expr };
+    enum class Kind { Missing, Register, Expr, Param };
     Kind kind = Kind::Missing;
 
     // Register: the raw word and its quality ("good"/"normal"/"bad"/"disabled")
@@ -110,7 +111,8 @@ struct TagInput {
     bool       isSigned = false;
     double     scale    = 1.0;
 
-    // Expr: the expression, or a fixed value given by the caller (eval API inputs)
+    // Expr: the expression, or a fixed value given by the caller (eval API inputs).
+    // Param: the value is always fixedSample (the stored value or an eval input).
     ValueType  valueType = ValueType::Bool;
     int        decimals  = -1;    // number results only; -1 = no rounding
     QJsonValue expr;
@@ -126,6 +128,46 @@ struct UsedInput {
 };
 
 using TagLookup = std::function<TagInput(const QString &id)>;
+
+//-----------------------------------------------------------//
+// Setting (param) tags: a value the user sets on the HMI, kept on the
+// device. Types are strict: number = JSON number, bool = true/false,
+// string = text of at most kParamTextMax characters.
+//-----------------------------------------------------------//
+struct ParamDef {
+    ValueType  vt = ValueType::Number;
+    QJsonValue initial;            // already rounded to decimals
+    bool       hasMin = false;     // number tags only
+    double     min    = 0.0;
+    bool       hasMax = false;
+    double     max    = 0.0;
+    int        decimals = -1;      // number tags only; -1 = no rounding
+};
+
+enum class ParamStatus { Ok, BadField, BadRule };   // BadField -> 400, BadRule -> 422
+
+// Reads a definition. Absent fields are Undefined. min / max / decimals
+// of a bool or string tag are ignored.
+ParamStatus parseParamDef(const QJsonValue &valueType, const QJsonValue &initial,
+                          const QJsonValue &min, const QJsonValue &max,
+                          const QJsonValue &decimals, ParamDef &out, QString &error);
+
+// Checks a value against a definition: type, then (number) rounding to
+// decimals with -0 made 0, then the range. On a range failure outOfRange
+// is set and out holds the rounded value. what names the value in errors.
+bool acceptParamValue(const ParamDef &def, const QJsonValue &v, const QString &what,
+                      QJsonValue &out, QString &error, bool &outOfRange);
+
+// The current value after a definition change.
+enum class ParamCarry { Kept, TypeChanged, Rounded, Clamped, Reset };
+QJsonValue carryParamValue(const ParamDef &def, bool sameType, const QJsonValue &oldValue,
+                           ParamCarry &how);
+
+// Storage as a JSON scalar ("85.5", "true", "\"주간\""); Undefined when unreadable.
+QString    paramToText(const QJsonValue &v);
+QJsonValue paramFromText(const QString &text);
+// For logs: strings quoted, the rest as toText.
+QString    paramLogText(const QJsonValue &v);
 
 class Evaluator {
 public:
